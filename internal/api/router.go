@@ -35,6 +35,10 @@ func NewRouter(st *store.Store, bookFile []byte) http.Handler {
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
 	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
 	mux.HandleFunc("GET /api/v1/shelves", s.listShelves)
+	mux.HandleFunc("POST /api/v1/shelves", s.createShelf)
+	mux.HandleFunc("DELETE /api/v1/shelves/{id}", s.deleteShelf)
+	mux.HandleFunc("POST /api/v1/shelves/{id}/books/{bookId}", s.addBookToShelf)
+	mux.HandleFunc("DELETE /api/v1/shelves/{id}/books/{bookId}", s.removeBookFromShelf)
 
 	mux.HandleFunc("GET /api/v1/books/{id}/progression", s.getProgression)
 	mux.HandleFunc("PUT /api/v1/books/{id}/progression", s.putProgression)
@@ -174,6 +178,56 @@ func (s *Server) listShelves(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": shelves, "totalElements": len(shelves)})
+}
+
+func (s *Server) createShelf(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		badRequest(w, fmt.Errorf("name required"))
+		return
+	}
+	sh, err := s.st.CreateShelf(strings.TrimSpace(body.Name))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, sh)
+}
+
+func (s *Server) deleteShelf(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteShelf(r.PathValue("id")); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) addBookToShelf(w http.ResponseWriter, r *http.Request) {
+	b, ok, err := s.st.SetBookShelf(r.PathValue("bookId"), r.PathValue("id"), true)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
+}
+
+func (s *Server) removeBookFromShelf(w http.ResponseWriter, r *http.Request) {
+	b, ok, err := s.st.SetBookShelf(r.PathValue("bookId"), r.PathValue("id"), false)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
 }
 
 func (s *Server) getProgression(w http.ResponseWriter, r *http.Request) {

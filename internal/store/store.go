@@ -238,6 +238,43 @@ func (s *Store) ListShelves() ([]model.Shelf, error) {
 	return shelves, rows.Err()
 }
 
+func (s *Store) CreateShelf(name string) (model.Shelf, error) {
+	sh := model.Shelf{ID: "sh-" + newID(), Name: name, Kind: "normal", IsPublic: false}
+	raw, _ := json.Marshal(sh)
+	_, err := s.db.Exec(`INSERT INTO shelves(id,data) VALUES(?,?)`, sh.ID, string(raw))
+	return sh, err
+}
+
+func (s *Store) DeleteShelf(id string) error {
+	if _, err := s.db.Exec(`DELETE FROM shelves WHERE id = ?`, id); err != nil {
+		return err
+	}
+	// drop membership from all books
+	books, _ := s.allBooks()
+	for _, b := range books {
+		if contains(b.ShelfIDs, id) {
+			b.ShelfIDs = without(b.ShelfIDs, id)
+			_ = s.SaveBook(b)
+		}
+	}
+	return nil
+}
+
+func (s *Store) SetBookShelf(bookID, shelfID string, add bool) (model.Book, bool, error) {
+	b, ok, err := s.GetBook(bookID)
+	if err != nil || !ok {
+		return model.Book{}, ok, err
+	}
+	if add {
+		if !contains(b.ShelfIDs, shelfID) {
+			b.ShelfIDs = append(b.ShelfIDs, shelfID)
+		}
+	} else {
+		b.ShelfIDs = without(b.ShelfIDs, shelfID)
+	}
+	return b, true, s.SaveBook(b)
+}
+
 // ---------- highlights ----------
 
 func (s *Store) ListHighlights(bookID string) ([]model.Highlight, error) {
@@ -387,6 +424,15 @@ func contains(ss []string, v string) bool {
 		}
 	}
 	return false
+}
+func without(ss []string, v string) []string {
+	out := []string{}
+	for _, s := range ss {
+		if s != v {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 func filter[T any](in []T, keep func(T) bool) []T {
 	out := in[:0]
