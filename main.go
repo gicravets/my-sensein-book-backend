@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -19,7 +20,9 @@ import (
 var sampleEPUB []byte
 
 func main() {
-	st, err := store.Open(env("DB_PATH", "app.sqlite"))
+	dbPath := env("DB_PATH", "app.sqlite")
+	filesDir := env("FILES_DIR", filepath.Join(filepath.Dir(dbPath), "files"))
+	st, err := store.Open(dbPath, filesDir)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}

@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -17,16 +19,23 @@ import (
 // personal-scale library). Pure-Go driver (modernc.org/sqlite) keeps the binary
 // static (CGO_ENABLED=0) for a tiny distroless image.
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	filesDir string
 }
 
-func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+func Open(dbPath, filesDir string) (*Store, error) {
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // sqlite single-writer
-	s := &Store{db: db}
+	if err := os.MkdirAll(filepath.Join(filesDir, "books"), 0o755); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Join(filesDir, "covers"), 0o755); err != nil {
+		return nil, err
+	}
+	s := &Store{db: db, filesDir: filesDir}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -35,6 +44,15 @@ func Open(path string) (*Store, error) {
 	}
 	return s, nil
 }
+
+func (s *Store) bookPath(id string) string  { return filepath.Join(s.filesDir, "books", id+".epub") }
+func (s *Store) coverPath(id string) string { return filepath.Join(s.filesDir, "covers", id) }
+
+// SaveBookFile / SaveBookCover persist uploaded bytes; BookFile / BookCover read them.
+func (s *Store) SaveBookFile(id string, data []byte) error  { return os.WriteFile(s.bookPath(id), data, 0o644) }
+func (s *Store) SaveBookCover(id string, data []byte) error { return os.WriteFile(s.coverPath(id), data, 0o644) }
+func (s *Store) BookFile(id string) ([]byte, error)         { return os.ReadFile(s.bookPath(id)) }
+func (s *Store) BookCover(id string) ([]byte, error)        { return os.ReadFile(s.coverPath(id)) }
 
 func (s *Store) Close() error { return s.db.Close() }
 

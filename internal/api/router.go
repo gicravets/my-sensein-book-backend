@@ -2,11 +2,15 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/gicravets/my-sensein-book-backend/internal/epub"
 	"github.com/gicravets/my-sensein-book-backend/internal/model"
 	"github.com/gicravets/my-sensein-book-backend/internal/store"
 )
@@ -26,8 +30,10 @@ func NewRouter(st *store.Store, bookFile []byte) http.Handler {
 	mux.HandleFunc("GET /health", s.health)
 
 	mux.HandleFunc("GET /api/v1/books", s.listBooks)
+	mux.HandleFunc("POST /api/v1/books", s.createBook)
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
+	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
 	mux.HandleFunc("GET /api/v1/shelves", s.listShelves)
 
 	mux.HandleFunc("GET /api/v1/books/{id}/progression", s.getProgression)
@@ -77,14 +83,88 @@ func (s *Server) getBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, b)
 }
 
+// POST /api/v1/books — multipart upload of an EPUB; parses metadata + cover.
+func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseMultipartForm(128 << 20); err != nil {
+		badRequest(w, err)
+		return
+	}
+	file, hdr, err := r.FormFile("file")
+	if err != nil {
+		badRequest(w, err)
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(file)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+
+	meta, _ := epub.Parse(data) // best-effort
+	id := fmt.Sprintf("bk-%d", time.Now().UnixNano())
+	title := meta.Title
+	if title == "" {
+		title = strings.TrimSuffix(hdr.Filename, ".epub")
+	}
+	authors := meta.Authors
+	if authors == nil {
+		authors = []string{}
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	b := model.Book{
+		ID: id, Title: title, Authors: authors, Format: model.FormatEPUB,
+		Size: int64(len(data)), AddedAt: now, CoverSeed: title,
+		Tags: []string{}, ShelfIDs: []string{},
+	}
+	if meta.Language != "" {
+		b.Language = &meta.Language
+	}
+	if meta.Description != "" {
+		b.Description = &meta.Description
+	}
+	if err := s.st.SaveBookFile(id, data); err != nil {
+		serverError(w, err)
+		return
+	}
+	if len(meta.Cover) > 0 {
+		if err := s.st.SaveBookCover(id, meta.Cover); err == nil {
+			url := fmt.Sprintf("http://%s/api/v1/books/%s/cover", r.Host, id)
+			b.CoverURL = &url
+		}
+	}
+	if err := s.st.SaveBook(b); err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, b)
+}
+
 func (s *Server) getBookFile(w http.ResponseWriter, r *http.Request) {
-	if _, ok, _ := s.st.GetBook(r.PathValue("id")); !ok {
+	id := r.PathValue("id")
+	if _, ok, _ := s.st.GetBook(id); !ok {
 		notFound(w)
 		return
 	}
 	w.Header().Set("Content-Type", "application/epub+zip")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(s.bookFile)
+	if data, err := s.st.BookFile(id); err == nil { // uploaded file
+		_, _ = w.Write(data)
+		return
+	}
+	_, _ = w.Write(s.bookFile) // fallback: bundled sample
+}
+
+func (s *Server) getBookCover(w http.ResponseWriter, r *http.Request) {
+	data, err := s.st.BookCover(r.PathValue("id"))
+	if err != nil {
+		notFound(w)
+		return
+	}
+	w.Header().Set("Content-Type", http.DetectContentType(data))
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write(data)
 }
 
 func (s *Server) listShelves(w http.ResponseWriter, _ *http.Request) {
