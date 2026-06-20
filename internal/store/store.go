@@ -389,10 +389,20 @@ func sortBooks(books []model.Book, key string) {
 		switch key {
 		case "title":
 			return a.Title < b.Title
+		case "title_desc":
+			return a.Title > b.Title
 		case "author":
 			return first(a.Authors) < first(b.Authors)
+		case "author_desc":
+			return first(a.Authors) > first(b.Authors)
 		case "progress":
 			return prog(b) < prog(a)
+		case "recent_old":
+			return recent(a) < recent(b)
+		case "pub": // no real pubdate stored — proxy with addedAt
+			return a.AddedAt > b.AddedAt
+		case "pub_desc":
+			return a.AddedAt < b.AddedAt
 		default: // recent
 			return recent(a) > recent(b)
 		}
