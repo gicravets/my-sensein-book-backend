@@ -92,6 +92,9 @@ func (s *Store) allBooks() ([]model.Book, error) {
 type BookQuery struct {
 	Search string
 	Shelf  string
+	Tag    string
+	Author string
+	Series string
 	Sort   string
 	Page   int
 	Size   int
@@ -118,6 +121,15 @@ func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
 	}
 	if q.Shelf != "" {
 		books = filter(books, func(b model.Book) bool { return contains(b.ShelfIDs, q.Shelf) })
+	}
+	if q.Tag != "" {
+		books = filter(books, func(b model.Book) bool { return contains(b.Tags, q.Tag) })
+	}
+	if q.Author != "" {
+		books = filter(books, func(b model.Book) bool { return contains(b.Authors, q.Author) })
+	}
+	if q.Series != "" {
+		books = filter(books, func(b model.Book) bool { return b.Series != nil && *b.Series == q.Series })
 	}
 	sortBooks(books, q.Sort)
 

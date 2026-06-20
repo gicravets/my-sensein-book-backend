@@ -65,7 +65,9 @@ func (s *Server) listBooks(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(q.Get("page"))
 	size, _ := strconv.Atoi(q.Get("size"))
 	res, err := s.st.ListBooks(store.BookQuery{
-		Search: q.Get("search"), Shelf: q.Get("shelf"), Sort: q.Get("sort"), Page: page, Size: size,
+		Search: q.Get("search"), Shelf: q.Get("shelf"), Tag: q.Get("tag"),
+		Author: q.Get("author"), Series: q.Get("series"),
+		Sort: q.Get("sort"), Page: page, Size: size,
 	})
 	if err != nil {
 		serverError(w, err)
