@@ -67,6 +67,7 @@ func (s *Server) listBooks(w http.ResponseWriter, r *http.Request) {
 	res, err := s.st.ListBooks(store.BookQuery{
 		Search: q.Get("search"), Shelf: q.Get("shelf"), Tag: q.Get("tag"),
 		Author: q.Get("author"), Series: q.Get("series"),
+		Language: q.Get("language"), Publisher: q.Get("publisher"), Format: q.Get("format"),
 		Sort: q.Get("sort"), Page: page, Size: size,
 	})
 	if err != nil {

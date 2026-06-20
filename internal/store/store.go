@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,14 +91,17 @@ func (s *Store) allBooks() ([]model.Book, error) {
 }
 
 type BookQuery struct {
-	Search string
-	Shelf  string
-	Tag    string
-	Author string
-	Series string
-	Sort   string
-	Page   int
-	Size   int
+	Search    string
+	Shelf     string
+	Tag       string
+	Author    string
+	Series    string
+	Language  string
+	Publisher string
+	Format    string
+	Sort      string
+	Page      int
+	Size      int
 }
 
 func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
@@ -131,7 +135,20 @@ func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
 	if q.Series != "" {
 		books = filter(books, func(b model.Book) bool { return b.Series != nil && *b.Series == q.Series })
 	}
-	sortBooks(books, q.Sort)
+	if q.Language != "" {
+		books = filter(books, func(b model.Book) bool { return b.Language != nil && *b.Language == q.Language })
+	}
+	if q.Publisher != "" {
+		books = filter(books, func(b model.Book) bool { return b.Publisher != nil && *b.Publisher == q.Publisher })
+	}
+	if q.Format != "" {
+		books = filter(books, func(b model.Book) bool { return string(b.Format) == q.Format })
+	}
+	if q.Sort == "random" {
+		rand.Shuffle(len(books), func(i, j int) { books[i], books[j] = books[j], books[i] })
+	} else {
+		sortBooks(books, q.Sort)
+	}
 
 	total := len(books)
 	if q.Size <= 0 {
