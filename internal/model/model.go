@@ -1,4 +1,4 @@
-package api
+package model
 
 // These structs mirror the frontend API contract
 // (my-sensein-book-frontend/src/lib/types.ts). API shape follows Komga's REST

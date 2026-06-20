@@ -1,0 +1,389 @@
+package store
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/gicravets/my-sensein-book-backend/internal/model"
+	_ "modernc.org/sqlite"
+)
+
+// Store is a thin SQLite-backed store. Entities are persisted as JSON blobs to
+// stay faithful to the API contract; filtering/sorting happens in Go (fine for a
+// personal-scale library). Pure-Go driver (modernc.org/sqlite) keeps the binary
+// static (CGO_ENABLED=0) for a tiny distroless image.
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1) // sqlite single-writer
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		return nil, err
+	}
+	if err := s.seedIfEmpty(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) migrate() error {
+	_, err := s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS books     (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS shelves   (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS highlights(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS bookmarks (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
+	`)
+	return err
+}
+
+// ---------- books ----------
+
+func (s *Store) allBooks() ([]model.Book, error) {
+	rows, err := s.db.Query(`SELECT data FROM books`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []model.Book
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var b model.Book
+		if err := json.Unmarshal([]byte(raw), &b); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+type BookQuery struct {
+	Search string
+	Shelf  string
+	Sort   string
+	Page   int
+	Size   int
+}
+
+func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
+	books, err := s.allBooks()
+	if err != nil {
+		return model.Page[model.Book]{}, err
+	}
+	if q.Search != "" {
+		needle := strings.ToLower(q.Search)
+		books = filter(books, func(b model.Book) bool {
+			if strings.Contains(strings.ToLower(b.Title), needle) {
+				return true
+			}
+			for _, a := range b.Authors {
+				if strings.Contains(strings.ToLower(a), needle) {
+					return true
+				}
+			}
+			return false
+		})
+	}
+	if q.Shelf != "" {
+		books = filter(books, func(b model.Book) bool { return contains(b.ShelfIDs, q.Shelf) })
+	}
+	sortBooks(books, q.Sort)
+
+	total := len(books)
+	if q.Size <= 0 {
+		q.Size = 50
+	}
+	start := q.Page * q.Size
+	end := start + q.Size
+	if start > total {
+		start = total
+	}
+	if end > total {
+		end = total
+	}
+	content := books[start:end]
+	if content == nil {
+		content = []model.Book{}
+	}
+	return model.Page[model.Book]{Content: content, TotalElements: total, PageNumber: q.Page, Size: q.Size}, nil
+}
+
+func (s *Store) GetBook(id string) (model.Book, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT data FROM books WHERE id = ?`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return model.Book{}, false, nil
+	}
+	if err != nil {
+		return model.Book{}, false, err
+	}
+	var b model.Book
+	if err := json.Unmarshal([]byte(raw), &b); err != nil {
+		return model.Book{}, false, err
+	}
+	return b, true, nil
+}
+
+func (s *Store) SaveBook(b model.Book) error {
+	raw, _ := json.Marshal(b)
+	_, err := s.db.Exec(`INSERT INTO books(id,data) VALUES(?,?)
+		ON CONFLICT(id) DO UPDATE SET data=excluded.data`, b.ID, string(raw))
+	return err
+}
+
+// PutProgression updates a book's reading position; auto-marks completed near the end.
+func (s *Store) PutProgression(id string, p model.ReadProgress) (model.Book, bool, error) {
+	b, ok, err := s.GetBook(id)
+	if err != nil || !ok {
+		return model.Book{}, ok, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	p.LastReadAt = &now
+	if p.DeviceName == nil {
+		dn := "Web PWA"
+		p.DeviceName = &dn
+	}
+	if p.TotalProgression >= 0.995 {
+		p.Completed = true
+	}
+	b.ReadProgress = &p
+	return b, true, s.SaveBook(b)
+}
+
+func (s *Store) SetCompleted(id string, completed bool) (model.Book, bool, error) {
+	b, ok, err := s.GetBook(id)
+	if err != nil || !ok {
+		return model.Book{}, ok, err
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rp := model.ReadProgress{LastReadAt: &now, DeviceName: strptr("Web PWA")}
+	if b.ReadProgress != nil {
+		rp = *b.ReadProgress
+		rp.LastReadAt = &now
+	}
+	rp.Completed = completed
+	if completed {
+		rp.Progression, rp.TotalProgression = 1, 1
+	}
+	b.ReadProgress = &rp
+	return b, true, s.SaveBook(b)
+}
+
+// ---------- shelves ----------
+
+func (s *Store) ListShelves() ([]model.Shelf, error) {
+	rows, err := s.db.Query(`SELECT data FROM shelves`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var shelves []model.Shelf
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var sh model.Shelf
+		if err := json.Unmarshal([]byte(raw), &sh); err != nil {
+			return nil, err
+		}
+		shelves = append(shelves, sh)
+	}
+	books, _ := s.allBooks()
+	for i := range shelves {
+		n := 0
+		for _, b := range books {
+			if contains(b.ShelfIDs, shelves[i].ID) {
+				n++
+			}
+		}
+		shelves[i].BookCount = n
+	}
+	sort.Slice(shelves, func(i, j int) bool { return shelves[i].Name < shelves[j].Name })
+	if shelves == nil {
+		shelves = []model.Shelf{}
+	}
+	return shelves, rows.Err()
+}
+
+// ---------- highlights ----------
+
+func (s *Store) ListHighlights(bookID string) ([]model.Highlight, error) {
+	q, args := `SELECT data FROM highlights`, []any{}
+	if bookID != "" {
+		q += ` WHERE book_id = ?`
+		args = append(args, bookID)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Highlight{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var h model.Highlight
+		if err := json.Unmarshal([]byte(raw), &h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out, rows.Err()
+}
+
+func (s *Store) CreateHighlight(h model.Highlight) (model.Highlight, error) {
+	h.ID = "hl-" + newID()
+	h.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, _ := json.Marshal(h)
+	_, err := s.db.Exec(`INSERT INTO highlights(id,book_id,data) VALUES(?,?,?)`, h.ID, h.BookID, string(raw))
+	return h, err
+}
+
+func (s *Store) PatchHighlight(id string, note *string, color string) (model.Highlight, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT data FROM highlights WHERE id = ?`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return model.Highlight{}, false, nil
+	}
+	if err != nil {
+		return model.Highlight{}, false, err
+	}
+	var h model.Highlight
+	_ = json.Unmarshal([]byte(raw), &h)
+	if note != nil {
+		h.Note = note
+	}
+	if color != "" {
+		h.Color = color
+	}
+	nb, _ := json.Marshal(h)
+	_, err = s.db.Exec(`UPDATE highlights SET data=? WHERE id=?`, string(nb), id)
+	return h, true, err
+}
+
+func (s *Store) DeleteHighlight(id string) error {
+	_, err := s.db.Exec(`DELETE FROM highlights WHERE id = ?`, id)
+	return err
+}
+
+// ---------- bookmarks ----------
+
+func (s *Store) ListBookmarks(bookID string) ([]model.Bookmark, error) {
+	q, args := `SELECT data FROM bookmarks`, []any{}
+	if bookID != "" {
+		q += ` WHERE book_id = ?`
+		args = append(args, bookID)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Bookmark{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var b model.Bookmark
+		if err := json.Unmarshal([]byte(raw), &b); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out, rows.Err()
+}
+
+func (s *Store) CreateBookmark(b model.Bookmark) (model.Bookmark, error) {
+	b.ID = "bm-" + newID()
+	b.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, _ := json.Marshal(b)
+	_, err := s.db.Exec(`INSERT INTO bookmarks(id,book_id,data) VALUES(?,?,?)`, b.ID, b.BookID, string(raw))
+	return b, err
+}
+
+func (s *Store) DeleteBookmark(id string) error {
+	_, err := s.db.Exec(`DELETE FROM bookmarks WHERE id = ?`, id)
+	return err
+}
+
+// ---------- helpers ----------
+
+func sortBooks(books []model.Book, key string) {
+	sort.SliceStable(books, func(i, j int) bool {
+		a, b := books[i], books[j]
+		switch key {
+		case "title":
+			return a.Title < b.Title
+		case "author":
+			return first(a.Authors) < first(b.Authors)
+		case "progress":
+			return prog(b) < prog(a)
+		default: // recent
+			return recent(a) > recent(b)
+		}
+	})
+}
+
+func prog(b model.Book) float64 {
+	if b.ReadProgress == nil {
+		return -1
+	}
+	return b.ReadProgress.TotalProgression
+}
+func recent(b model.Book) string {
+	if b.ReadProgress != nil && b.ReadProgress.LastReadAt != nil {
+		return *b.ReadProgress.LastReadAt
+	}
+	return b.AddedAt
+}
+func first(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	return ss[0]
+}
+func contains(ss []string, v string) bool {
+	for _, s := range ss {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+func filter[T any](in []T, keep func(T) bool) []T {
+	out := in[:0]
+	for _, x := range in {
+		if keep(x) {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+func strptr(s string) *string { return &s }
+
+var idSeq int64
+
+func newID() string {
+	idSeq++
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), idSeq)
+}
