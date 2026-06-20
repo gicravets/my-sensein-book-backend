@@ -1,0 +1,22 @@
+# Binaries
+/bin/
+*.exe
+*.out
+my-sensein-book-backend
+
+# Go
+/vendor/
+*.test
+*.prof
+
+# Data / local
+*.sqlite
+*.sqlite-*
+/data/
+
+# Env
+.env
+.env.*
+
+# macOS
+.DS_Store
