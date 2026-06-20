@@ -28,10 +28,12 @@ func main() {
 	}
 	defer st.Close()
 
+	requireAuth := env("REQUIRE_AUTH", "false") == "true"
+	masterKey := env("API_KEY", "")
 	addr := ":" + env("PORT", "8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.NewRouter(st, sampleEPUB),
+		Handler:           api.NewRouter(st, sampleEPUB, requireAuth, masterKey),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

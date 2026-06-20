@@ -17,17 +17,22 @@ import (
 
 // Server holds dependencies for the HTTP handlers.
 type Server struct {
-	st       *store.Store
-	bookFile []byte // demo: every book serves this EPUB; real storage comes later
+	st        *store.Store
+	bookFile  []byte // demo: every book serves this EPUB; real storage comes later
+	requireAuth bool
+	masterKey   string
 }
 
 // NewRouter wires routes. Shape follows the frontend contract (Komga-style REST
 // + CWA data model). bookFile is the EPUB served by GET /books/{id}/file.
-func NewRouter(st *store.Store, bookFile []byte) http.Handler {
-	s := &Server{st: st, bookFile: bookFile}
+// When requireAuth is true, /api/v1/* needs a valid X-API-Key (device key or
+// masterKey); /health and device registration stay open.
+func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey string) http.Handler {
+	s := &Server{st: st, bookFile: bookFile, requireAuth: requireAuth, masterKey: masterKey}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("POST /api/v1/auth/device", s.registerDevice)
 
 	mux.HandleFunc("GET /api/v1/books", s.listBooks)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
@@ -53,7 +58,46 @@ func NewRouter(st *store.Store, bookFile []byte) http.Handler {
 	mux.HandleFunc("POST /api/v1/bookmarks", s.createBookmark)
 	mux.HandleFunc("DELETE /api/v1/bookmarks/{id}", s.deleteBookmark)
 
-	return cors(logging(mux))
+	return cors(logging(s.auth(mux)))
+}
+
+// auth gate: when enabled, /api/v1/* (except /api/v1/auth/*) needs a valid key.
+func (s *Server) auth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireAuth || r.Method == http.MethodOptions ||
+			!strings.HasPrefix(r.URL.Path, "/api/v1/") ||
+			strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		key := r.Header.Get("X-API-Key")
+		if (s.masterKey != "" && key == s.masterKey) || s.st.ValidKey(key) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or missing X-API-Key"})
+	})
+}
+
+func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if strings.TrimSpace(body.Name) == "" {
+		body.Name = "device"
+	}
+	// when auth is enforced, registering a new device requires the master key
+	if s.requireAuth && s.masterKey != "" && r.Header.Get("X-API-Key") != s.masterKey {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "master key required to register"})
+		return
+	}
+	d, err := s.st.RegisterDevice(strings.TrimSpace(body.Name))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, d)
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

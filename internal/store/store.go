@@ -1,7 +1,9 @@
 package store
 
 import (
+	cryptorand "crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -63,8 +65,35 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS shelves   (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS highlights(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS bookmarks (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS devices   (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, created TEXT NOT NULL);
 	`)
 	return err
+}
+
+// ---------- devices / API keys ----------
+
+type Device struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Key     string `json:"key"`
+	Created string `json:"created"`
+}
+
+func (s *Store) RegisterDevice(name string) (Device, error) {
+	b := make([]byte, 24)
+	_, _ = cryptorand.Read(b)
+	d := Device{ID: "dev-" + newID(), Name: name, Key: hex.EncodeToString(b), Created: time.Now().UTC().Format(time.RFC3339)}
+	_, err := s.db.Exec(`INSERT INTO devices(id,name,key,created) VALUES(?,?,?,?)`, d.ID, d.Name, d.Key, d.Created)
+	return d, err
+}
+
+func (s *Store) ValidKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM devices WHERE key = ?`, key).Scan(&n)
+	return n > 0
 }
 
 // ---------- books ----------
