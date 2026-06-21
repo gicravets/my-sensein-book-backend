@@ -33,6 +33,9 @@ func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey str
 
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /api/v1/auth/device", s.registerDevice)
+	mux.HandleFunc("POST /api/v1/auth/pair", s.createPairing)
+	mux.HandleFunc("POST /api/v1/auth/pair/claim", s.claimPairing)
+	mux.HandleFunc("GET /api/v1/auth/pair/status", s.pairingStatus)
 
 	mux.HandleFunc("GET /api/v1/books", s.listBooks)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
@@ -100,6 +103,56 @@ func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, d)
+}
+
+// POST /api/v1/auth/pair — web (authed) creates a short-lived pairing token + QR payload.
+func (s *Server) createPairing(w http.ResponseWriter, r *http.Request) {
+	if s.requireAuth && s.masterKey != "" && r.Header.Get("X-API-Key") != s.masterKey {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "master key required"})
+		return
+	}
+	p, err := s.st.CreatePairing(5 * time.Minute)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	serverURL := fmt.Sprintf("http://%s", r.Host)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"token":   p.Token,
+		"expires": p.Expires,
+		"qr":      map[string]string{"url": serverURL, "t": p.Token}, // encode this JSON in the QR
+	})
+}
+
+// POST /api/v1/auth/pair/claim — iOS scans QR, exchanges token for a device key.
+func (s *Server) claimPairing(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"token"`
+		Name  string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		badRequest(w, fmt.Errorf("token required"))
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		body.Name = "iOS device"
+	}
+	d, ok, err := s.st.ClaimPairing(body.Token, strings.TrimSpace(body.Name))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid, expired or already-used token"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"deviceId": d.ID, "deviceName": d.Name, "key": d.Key})
+}
+
+// GET /api/v1/auth/pair/status?token= — web polls to learn when the device linked.
+func (s *Server) pairingStatus(w http.ResponseWriter, r *http.Request) {
+	status, name := s.st.PairingStatus(r.URL.Query().Get("token"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": status, "deviceName": name})
 }
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {

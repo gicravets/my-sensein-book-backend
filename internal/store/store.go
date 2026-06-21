@@ -91,8 +91,68 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS highlights(id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS bookmarks (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS devices   (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, created TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS pairings  (token TEXT PRIMARY KEY, device_key TEXT, device_name TEXT, claimed INTEGER NOT NULL DEFAULT 0, expires TEXT NOT NULL, created TEXT NOT NULL);
 	`)
 	return err
+}
+
+// ---------- QR pairing (RemoteAuthToken pattern, ref: Calibre-Web remote-login) ----------
+
+type Pairing struct {
+	Token   string `json:"token"`
+	Expires string `json:"expires"`
+}
+
+// CreatePairing makes a short-lived pending pairing token (default 5 min).
+func (s *Store) CreatePairing(ttl time.Duration) (Pairing, error) {
+	b := make([]byte, 16)
+	_, _ = cryptorand.Read(b)
+	p := Pairing{Token: hex.EncodeToString(b), Expires: time.Now().UTC().Add(ttl).Format(time.RFC3339)}
+	_, err := s.db.Exec(`INSERT INTO pairings(token,expires,created) VALUES(?,?,?)`,
+		p.Token, p.Expires, time.Now().UTC().Format(time.RFC3339))
+	return p, err
+}
+
+// ClaimPairing exchanges a valid pending token for a new device key.
+func (s *Store) ClaimPairing(token, name string) (Device, bool, error) {
+	var expires string
+	var claimed int
+	err := s.db.QueryRow(`SELECT expires, claimed FROM pairings WHERE token = ?`, token).Scan(&expires, &claimed)
+	if err == sql.ErrNoRows {
+		return Device{}, false, nil
+	}
+	if err != nil {
+		return Device{}, false, err
+	}
+	if claimed == 1 {
+		return Device{}, false, nil // already used
+	}
+	if exp, e := time.Parse(time.RFC3339, expires); e == nil && time.Now().After(exp) {
+		return Device{}, false, nil // expired
+	}
+	d, err := s.RegisterDevice(name)
+	if err != nil {
+		return Device{}, false, err
+	}
+	_, err = s.db.Exec(`UPDATE pairings SET device_key=?, device_name=?, claimed=1 WHERE token=?`, d.Key, d.Name, token)
+	return d, true, err
+}
+
+// PairingStatus tells the waiting web client whether the token was claimed.
+func (s *Store) PairingStatus(token string) (status string, deviceName string) {
+	var claimed int
+	var expires, dn string
+	err := s.db.QueryRow(`SELECT claimed, expires, COALESCE(device_name,'') FROM pairings WHERE token = ?`, token).Scan(&claimed, &expires, &dn)
+	if err != nil {
+		return "unknown", ""
+	}
+	if claimed == 1 {
+		return "claimed", dn
+	}
+	if exp, e := time.Parse(time.RFC3339, expires); e == nil && time.Now().After(exp) {
+		return "expired", ""
+	}
+	return "pending", ""
 }
 
 // ---------- devices / API keys ----------
