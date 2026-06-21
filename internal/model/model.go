@@ -20,6 +20,10 @@ type ReadProgress struct {
 	Completed        bool    `json:"completed"`
 	LastReadAt       *string `json:"lastReadAt"`
 	DeviceName       *string `json:"deviceName"`
+	// ClientLocator holds the client's native reading position (opaque JSON) so
+	// same-engine clients (e.g. iOS<->iOS) can resume at the exact spot. Web uses
+	// its own Readium locator; cross-engine clients fall back to TotalProgression.
+	ClientLocator    string  `json:"clientLocator,omitempty"`
 }
 
 type Book struct {
