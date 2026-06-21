@@ -42,6 +42,9 @@ func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey str
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
 	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
+	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
+	mux.HandleFunc("DELETE /api/v1/devices/{id}", s.deleteDevice)
+
 	mux.HandleFunc("GET /api/v1/shelves", s.listShelves)
 	mux.HandleFunc("POST /api/v1/shelves", s.createShelf)
 	mux.HandleFunc("DELETE /api/v1/shelves/{id}", s.deleteShelf)
@@ -280,6 +283,23 @@ func (s *Server) listShelves(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": shelves, "totalElements": len(shelves)})
+}
+
+func (s *Server) listDevices(w http.ResponseWriter, _ *http.Request) {
+	devs, err := s.st.ListDevices()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": devs, "totalElements": len(devs)})
+}
+
+func (s *Server) deleteDevice(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteDevice(r.PathValue("id")); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) createShelf(w http.ResponseWriter, r *http.Request) {

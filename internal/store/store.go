@@ -172,6 +172,29 @@ func (s *Store) RegisterDevice(name string) (Device, error) {
 	return d, err
 }
 
+// ListDevices returns registered devices WITHOUT their keys (for a management UI).
+func (s *Store) ListDevices() ([]Device, error) {
+	rows, err := s.db.Query(`SELECT id, name, created FROM devices ORDER BY created DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Device{}
+	for rows.Next() {
+		var d Device
+		if err := rows.Scan(&d.ID, &d.Name, &d.Created); err != nil {
+			return nil, err
+		}
+		out = append(out, d) // Key intentionally left empty
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteDevice(id string) error {
+	_, err := s.db.Exec(`DELETE FROM devices WHERE id = ?`, id)
+	return err
+}
+
 func (s *Store) ValidKey(key string) bool {
 	if key == "" {
 		return false
