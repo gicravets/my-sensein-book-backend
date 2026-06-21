@@ -40,6 +40,8 @@ type Book struct {
 	CoverURL      *string       `json:"coverUrl"`
 	ReadProgress  *ReadProgress `json:"readProgress"`
 	ShelfIDs      []string      `json:"shelfIds"`
+	Rating        int           `json:"rating"`
+	Archived      bool          `json:"archived"`
 }
 
 type Shelf struct {

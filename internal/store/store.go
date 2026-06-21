@@ -56,6 +56,31 @@ func (s *Store) SaveBookFile(id string, data []byte) error  { return os.WriteFil
 func (s *Store) SaveBookCover(id string, data []byte) error { return os.WriteFile(s.coverPath(id), data, 0o644) }
 func (s *Store) BookFile(id string) ([]byte, error)         { return os.ReadFile(s.bookPath(id)) }
 func (s *Store) BookCover(id string) ([]byte, error)        { return os.ReadFile(s.coverPath(id)) }
+func (s *Store) hasFile(id string) bool                     { _, err := os.Stat(s.bookPath(id)); return err == nil }
+
+func (s *Store) SetRating(id string, rating int) (model.Book, bool, error) {
+	b, ok, err := s.GetBook(id)
+	if err != nil || !ok {
+		return model.Book{}, ok, err
+	}
+	if rating < 0 {
+		rating = 0
+	}
+	if rating > 5 {
+		rating = 5
+	}
+	b.Rating = rating
+	return b, true, s.SaveBook(b)
+}
+
+func (s *Store) SetArchived(id string, archived bool) (model.Book, bool, error) {
+	b, ok, err := s.GetBook(id)
+	if err != nil || !ok {
+		return model.Book{}, ok, err
+	}
+	b.Archived = archived
+	return b, true, s.SaveBook(b)
+}
 
 func (s *Store) Close() error { return s.db.Close() }
 
@@ -128,6 +153,7 @@ type BookQuery struct {
 	Language  string
 	Publisher string
 	Format    string
+	Filter    string // "" | read | unread | archived | rated | downloaded | hot
 	Sort      string
 	Page      int
 	Size      int
@@ -172,6 +198,29 @@ func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
 	}
 	if q.Format != "" {
 		books = filter(books, func(b model.Book) bool { return string(b.Format) == q.Format })
+	}
+	// status filter (default hides archived)
+	books = filter(books, func(b model.Book) bool {
+		done := b.ReadProgress != nil && b.ReadProgress.Completed
+		switch q.Filter {
+		case "archived":
+			return b.Archived
+		case "read":
+			return done && !b.Archived
+		case "unread":
+			return !done && !b.Archived
+		case "rated":
+			return b.Rating > 0 && !b.Archived
+		case "downloaded":
+			return s.hasFile(b.ID) && !b.Archived
+		case "hot":
+			return b.ReadProgress != nil && !b.Archived
+		default:
+			return !b.Archived
+		}
+	})
+	if q.Filter == "hot" && q.Sort == "" {
+		q.Sort = "recent"
 	}
 	if q.Sort == "random" {
 		rand.Shuffle(len(books), func(i, j int) { books[i], books[j] = books[j], books[i] })
@@ -455,6 +504,8 @@ func sortBooks(books []model.Book, key string) {
 			return first(a.Authors) > first(b.Authors)
 		case "progress":
 			return prog(b) < prog(a)
+		case "rating":
+			return a.Rating > b.Rating
 		case "recent_old":
 			return recent(a) < recent(b)
 		case "pub": // no real pubdate stored — proxy with addedAt

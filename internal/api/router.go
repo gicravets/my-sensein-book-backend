@@ -48,6 +48,8 @@ func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey str
 	mux.HandleFunc("GET /api/v1/books/{id}/progression", s.getProgression)
 	mux.HandleFunc("PUT /api/v1/books/{id}/progression", s.putProgression)
 	mux.HandleFunc("PATCH /api/v1/books/{id}/read-progress", s.patchReadProgress)
+	mux.HandleFunc("PATCH /api/v1/books/{id}/rating", s.patchRating)
+	mux.HandleFunc("PATCH /api/v1/books/{id}/archived", s.patchArchived)
 
 	mux.HandleFunc("GET /api/v1/highlights", s.listHighlights)
 	mux.HandleFunc("POST /api/v1/highlights", s.createHighlight)
@@ -112,7 +114,7 @@ func (s *Server) listBooks(w http.ResponseWriter, r *http.Request) {
 		Search: q.Get("search"), Shelf: q.Get("shelf"), Tag: q.Get("tag"),
 		Author: q.Get("author"), Series: q.Get("series"),
 		Language: q.Get("language"), Publisher: q.Get("publisher"), Format: q.Get("format"),
-		Sort: q.Get("sort"), Page: page, Size: size,
+		Filter: q.Get("filter"), Sort: q.Get("sort"), Page: page, Size: size,
 	})
 	if err != nil {
 		serverError(w, err)
@@ -326,6 +328,46 @@ func (s *Server) patchReadProgress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, b.ReadProgress)
+}
+
+func (s *Server) patchRating(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Rating int `json:"rating"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	b, ok, err := s.st.SetRating(r.PathValue("id"), body.Rating)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
+}
+
+func (s *Server) patchArchived(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Archived bool `json:"archived"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	b, ok, err := s.st.SetArchived(r.PathValue("id"), body.Archived)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, b)
 }
 
 func (s *Server) listHighlights(w http.ResponseWriter, r *http.Request) {
