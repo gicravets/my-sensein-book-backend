@@ -1,0 +1,39 @@
+# Full My.Sensein.Book stack: Go backend + production Next.js web.
+# Assumes the frontend repo is checked out as a sibling directory
+# (../my-sensein-book-frontend). Run from this repo:
+#   docker compose up --build -d
+#   open http://localhost:3000   (API at http://localhost:8090)
+#
+# NEXT_PUBLIC_API_BASE is baked into the web at build time (the browser uses it).
+# For a real host/domain rebuild with: NEXT_PUBLIC_API_BASE=https://api.example.com docker compose build web
+name: my-sensein-book
+
+services:
+  backend:
+    build: .
+    image: my-sensein-book-backend
+    ports:
+      - "8090:8080"
+    environment:
+      DB_PATH: /data/app.sqlite
+      FILES_DIR: /data/files
+      # REQUIRE_AUTH: "true"   # enable device-token auth
+      # API_KEY: "change-me"   # master key when REQUIRE_AUTH is on
+    volumes:
+      - msb-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../my-sensein-book-frontend
+      args:
+        NEXT_PUBLIC_API_BASE: "${NEXT_PUBLIC_API_BASE:-http://localhost:8090}"
+    image: my-sensein-book-web
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  msb-data:
