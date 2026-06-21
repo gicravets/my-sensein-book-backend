@@ -38,6 +38,7 @@ book files+covers), `REQUIRE_AUTH` (false), `API_KEY` (master key when auth on).
   ratings, archived, file/cover storage, device keys + QR pairing.
 - `internal/api` — `NewRouter`, handlers, CORS, optional auth gate.
 - `internal/epub` — dependency-free EPUB metadata + cover extraction (for upload).
+- `internal/fb2` — FB2 → minimal-EPUB converter (`ToEPUB`, `Meta`, `IsFB2`). `/books/{id}/file` converts FB2 to EPUB on the fly (cached per id) so the epub.js readers render FB2 with no separate reader; upload detects FB2 and parses its metadata.
 
 ## API (selected)
 - `GET /health`
