@@ -18,6 +18,15 @@ library + reading history and serves a REST API consumed by the web PWA and iOS 
   and `go 1.25` in go.mod. golang:1.23 fails with a toolchain error.
 - macOS has no `timeout` CLI — don't rely on it in helper scripts.
 
+## Deploy — full stack (backend + prod web)
+`docker-compose.yml` here runs both services (web built from the sibling
+`../my-sensein-book-frontend` repo). From this repo:
+```bash
+docker compose up --build -d     # web :3000, API :8090
+# rebuild web for a real host:  NEXT_PUBLIC_API_BASE=https://api.example.com docker compose build web
+```
+NEXT_PUBLIC_API_BASE is baked into the web at BUILD time (the browser uses it).
+
 ## Run (Docker only)
 ```bash
 docker build -t my-sensein-book-backend .
