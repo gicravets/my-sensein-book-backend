@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gicravets/my-sensein-book-backend/internal/epub"
+	"github.com/gicravets/my-sensein-book-backend/internal/fb2"
 	"github.com/gicravets/my-sensein-book-backend/internal/model"
 	"github.com/gicravets/my-sensein-book-backend/internal/store"
 )
@@ -21,6 +23,8 @@ type Server struct {
 	bookFile  []byte // demo: every book serves this EPUB; real storage comes later
 	requireAuth bool
 	masterKey   string
+	fbMu        sync.Mutex
+	fbCache     map[string][]byte // id -> FB2-converted EPUB
 }
 
 // NewRouter wires routes. Shape follows the frontend contract (Komga-style REST
@@ -210,11 +214,17 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	meta, _ := epub.Parse(data) // best-effort
+	meta, _ := epub.Parse(data) // best-effort (EPUB)
+	format := model.FormatEPUB
+	if fb2.IsFB2(data) { // FB2: parse its own metadata
+		format = model.FormatFB2
+		t, a, lang, cover := fb2.Meta(data)
+		meta.Title, meta.Authors, meta.Language, meta.Cover = t, a, lang, cover
+	}
 	id := fmt.Sprintf("bk-%d", time.Now().UnixNano())
 	title := meta.Title
 	if title == "" {
-		title = strings.TrimSuffix(hdr.Filename, ".epub")
+		title = strings.TrimSuffix(strings.TrimSuffix(hdr.Filename, ".epub"), ".fb2")
 	}
 	authors := meta.Authors
 	if authors == nil {
@@ -223,7 +233,7 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	b := model.Book{
-		ID: id, Title: title, Authors: authors, Format: model.FormatEPUB,
+		ID: id, Title: title, Authors: authors, Format: format,
 		Size: int64(len(data)), AddedAt: now, CoverSeed: title,
 		Tags: []string{}, ShelfIDs: []string{},
 	}
@@ -259,10 +269,35 @@ func (s *Server) getBookFile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/epub+zip")
 	w.Header().Set("Cache-Control", "no-store")
 	if data, err := s.st.BookFile(id); err == nil { // uploaded file
+		// FB2 → convert to EPUB on the fly so the epub.js readers handle it.
+		if fb2.IsFB2(data) {
+			if epub, ok := s.fb2EPUB(id, data); ok {
+				_, _ = w.Write(epub)
+				return
+			}
+		}
 		_, _ = w.Write(data)
 		return
 	}
 	_, _ = w.Write(s.bookFile) // fallback: bundled sample
+}
+
+// fb2EPUB returns the EPUB conversion of an FB2 file, cached per book id.
+func (s *Server) fb2EPUB(id string, fb2Data []byte) ([]byte, bool) {
+	s.fbMu.Lock()
+	defer s.fbMu.Unlock()
+	if s.fbCache == nil {
+		s.fbCache = map[string][]byte{}
+	}
+	if e, ok := s.fbCache[id]; ok {
+		return e, true
+	}
+	epub, err := fb2.ToEPUB(fb2Data)
+	if err != nil {
+		return nil, false
+	}
+	s.fbCache[id] = epub
+	return epub, true
 }
 
 func (s *Server) getBookCover(w http.ResponseWriter, r *http.Request) {
