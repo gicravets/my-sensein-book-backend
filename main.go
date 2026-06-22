@@ -19,6 +19,9 @@ import (
 //go:embed assets/sample.epub
 var sampleEPUB []byte
 
+// version is the build version. Default "dev"; override via APP_VERSION (or ldflags).
+var version = "dev"
+
 func main() {
 	dbPath := env("DB_PATH", "app.sqlite")
 	filesDir := env("FILES_DIR", filepath.Join(filepath.Dir(dbPath), "files"))
@@ -30,10 +33,19 @@ func main() {
 
 	requireAuth := env("REQUIRE_AUTH", "false") == "true"
 	masterKey := env("API_KEY", "")
+	demo := env("DEMO_MODE", "false") == "true"
+	cfg := api.Config{
+		BookFile:    sampleEPUB,
+		RequireAuth: requireAuth,
+		MasterKey:   masterKey,
+		Demo:        demo,
+		Version:     env("APP_VERSION", version),
+		Repo:        env("UPDATE_REPO", "gicravets/my-sensein-book-backend"),
+	}
 	addr := ":" + env("PORT", "8080")
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.NewRouter(st, sampleEPUB, requireAuth, masterKey),
+		Handler:           api.NewRouter(st, cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

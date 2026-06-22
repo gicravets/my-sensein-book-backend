@@ -1,6 +1,8 @@
 package api
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,25 +19,48 @@ import (
 	"github.com/gicravets/my-sensein-book-backend/internal/store"
 )
 
+// Config holds the server's runtime configuration.
+type Config struct {
+	BookFile    []byte // fallback EPUB served when a book has no stored file
+	RequireAuth bool
+	MasterKey   string
+	Demo        bool   // read-only demo deployment (writes are blocked)
+	Version     string // build version, surfaced by GET /version
+	Repo        string // GitHub owner/repo for the update check
+}
+
 // Server holds dependencies for the HTTP handlers.
 type Server struct {
-	st        *store.Store
-	bookFile  []byte // demo: every book serves this EPUB; real storage comes later
+	st          *store.Store
+	bookFile    []byte
 	requireAuth bool
 	masterKey   string
+	demo        bool
+	version     string
+	repo        string
 	fbMu        sync.Mutex
 	fbCache     map[string][]byte // id -> FB2-converted EPUB
+	upMu        sync.Mutex
+	upCache     *updateInfo // cached GitHub update check
+	upAt        time.Time
 }
 
 // NewRouter wires routes. Shape follows the frontend contract (Komga-style REST
-// + CWA data model). bookFile is the EPUB served by GET /books/{id}/file.
-// When requireAuth is true, /api/v1/* needs a valid X-API-Key (device key or
-// masterKey); /health and device registration stay open.
-func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey string) http.Handler {
-	s := &Server{st: st, bookFile: bookFile, requireAuth: requireAuth, masterKey: masterKey}
+// + CWA data model). When requireAuth is true, /api/v1/* needs a valid X-API-Key
+// (device key, DB admin key, or masterKey); /health, /setup, /version, /update and
+// device registration stay open. In demo mode all writes are blocked.
+func NewRouter(st *store.Store, cfg Config) http.Handler {
+	s := &Server{
+		st: st, bookFile: cfg.BookFile, requireAuth: cfg.RequireAuth,
+		masterKey: cfg.MasterKey, demo: cfg.Demo, version: cfg.Version, repo: cfg.Repo,
+	}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("GET /api/v1/setup", s.setupStatus)
+	mux.HandleFunc("POST /api/v1/setup/claim", s.setupClaim)
+	mux.HandleFunc("GET /api/v1/version", s.serverVersion)
+	mux.HandleFunc("GET /api/v1/update", s.updateCheck)
 	mux.HandleFunc("POST /api/v1/auth/device", s.registerDevice)
 	mux.HandleFunc("POST /api/v1/auth/pair", s.createPairing)
 	mux.HandleFunc("POST /api/v1/auth/pair/claim", s.claimPairing)
@@ -70,25 +95,164 @@ func NewRouter(st *store.Store, bookFile []byte, requireAuth bool, masterKey str
 	mux.HandleFunc("POST /api/v1/bookmarks", s.createBookmark)
 	mux.HandleFunc("DELETE /api/v1/bookmarks/{id}", s.deleteBookmark)
 
-	return cors(logging(s.auth(mux)))
+	return cors(logging(s.auth(s.demoGuard(mux))))
 }
 
-// auth gate: when enabled, /api/v1/* (except /api/v1/auth/*) needs a valid key.
+// openPath reports whether a path bypasses the auth gate (bootstrap + auth flows).
+func openPath(p string) bool {
+	return strings.HasPrefix(p, "/api/v1/auth/") ||
+		strings.HasPrefix(p, "/api/v1/setup") ||
+		p == "/api/v1/version" || p == "/api/v1/update"
+}
+
+// auth gate: when enabled, /api/v1/* (except open bootstrap paths) needs a valid key.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.requireAuth || r.Method == http.MethodOptions ||
-			!strings.HasPrefix(r.URL.Path, "/api/v1/") ||
-			strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			!strings.HasPrefix(r.URL.Path, "/api/v1/") || openPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		key := r.Header.Get("X-API-Key")
-		if (s.masterKey != "" && key == s.masterKey) || s.st.ValidKey(key) {
+		if s.validAdmin(key) || s.st.ValidKey(key) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid or missing X-API-Key"})
 	})
+}
+
+// validAdmin matches the env master key or the DB admin key set during setup.
+func (s *Server) validAdmin(key string) bool {
+	if key == "" {
+		return false
+	}
+	if s.masterKey != "" && key == s.masterKey {
+		return true
+	}
+	if ak, ok, _ := s.st.GetSetting("admin_key"); ok && key == ak {
+		return true
+	}
+	return false
+}
+
+// demoGuard blocks mutating requests in demo mode (read-only deployment).
+func (s *Server) demoGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.demo && r.Method != http.MethodGet && r.Method != http.MethodOptions &&
+			strings.HasPrefix(r.URL.Path, "/api/v1/") && !strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "demo mode: read-only"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ---------- setup wizard / version / update (ref: Komga claim + announcements, CWA update channel) ----------
+
+// isClaimed reports whether initial setup is done (an admin exists, demo, or env master key).
+func (s *Server) isClaimed() bool {
+	if s.demo || s.masterKey != "" {
+		return true
+	}
+	if _, ok, _ := s.st.GetSetting("admin_key"); ok {
+		return true
+	}
+	return s.st.HasAnyDevice()
+}
+
+// GET /api/v1/setup — first-run status (open). Clients show a wizard when claimed=false.
+func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"claimed":      s.isClaimed(),
+		"demo":         s.demo,
+		"requiresAuth": s.requireAuth,
+		"version":      s.version,
+	})
+}
+
+// POST /api/v1/setup/claim — create the admin key on a fresh server (ref: Komga claim).
+// Body {apiKey?}; if omitted a key is generated. Returns the admin apiKey once.
+func (s *Server) setupClaim(w http.ResponseWriter, r *http.Request) {
+	if s.isClaimed() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "already set up"})
+		return
+	}
+	var body struct {
+		APIKey string `json:"apiKey"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	key := strings.TrimSpace(body.APIKey)
+	if key == "" {
+		b := make([]byte, 24)
+		_, _ = cryptorand.Read(b)
+		key = hex.EncodeToString(b)
+	}
+	if err := s.st.SetSetting("admin_key", key); err != nil {
+		serverError(w, err)
+		return
+	}
+	_ = s.st.SetSetting("claimed", "true")
+	writeJSON(w, http.StatusCreated, map[string]any{"apiKey": key, "claimed": true})
+}
+
+// GET /api/v1/version — build version (open).
+func (s *Server) serverVersion(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"version": s.version, "demo": s.demo})
+}
+
+type updateInfo struct {
+	Current         string `json:"current"`
+	Latest          string `json:"latest"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+	URL             string `json:"url"`
+}
+
+// GET /api/v1/update — latest GitHub release vs current (cached ~1h). Notify-only,
+// like Komga announcements (the actual update is a Docker image pull).
+func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
+	s.upMu.Lock()
+	if s.upCache != nil && time.Since(s.upAt) < time.Hour {
+		info := *s.upCache
+		s.upMu.Unlock()
+		writeJSON(w, http.StatusOK, info)
+		return
+	}
+	s.upMu.Unlock()
+
+	info := updateInfo{Current: s.version}
+	if s.repo != "" {
+		if latest, url, ok := fetchLatestRelease(s.repo); ok {
+			info.Latest, info.URL = latest, url
+			info.UpdateAvailable = latest != "" && latest != s.version && s.version != "dev"
+		}
+	}
+	s.upMu.Lock()
+	s.upCache, s.upAt = &info, time.Now()
+	s.upMu.Unlock()
+	writeJSON(w, http.StatusOK, info)
+}
+
+func fetchLatestRelease(repo string) (tag, url string, ok bool) {
+	c := &http.Client{Timeout: 6 * time.Second}
+	req, _ := http.NewRequest(http.MethodGet, "https://api.github.com/repos/"+repo+"/releases/latest", nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := c.Do(req)
+	if err != nil {
+		return "", "", false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", "", false
+	}
+	var rel struct {
+		TagName string `json:"tag_name"`
+		HTMLURL string `json:"html_url"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&rel) != nil {
+		return "", "", false
+	}
+	return rel.TagName, rel.HTMLURL, true
 }
 
 func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {

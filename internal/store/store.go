@@ -92,8 +92,34 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS bookmarks (id TEXT PRIMARY KEY, book_id TEXT NOT NULL, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS devices   (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pairings  (token TEXT PRIMARY KEY, device_key TEXT, device_name TEXT, claimed INTEGER NOT NULL DEFAULT 0, expires TEXT NOT NULL, created TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 	`)
 	return err
+}
+
+// ---------- settings (key/value, ref: Komga SERVER_SETTINGS) ----------
+
+// GetSetting reads a server setting; ok=false when the key is absent.
+func (s *Store) GetSetting(key string) (value string, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return value, err == nil, err
+}
+
+// SetSetting upserts a server setting.
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// HasAnyDevice reports whether at least one device key exists (a proxy for "set up").
+func (s *Store) HasAnyDevice() bool {
+	var n int
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&n)
+	return n > 0
 }
 
 // ---------- QR pairing (RemoteAuthToken pattern, ref: Calibre-Web remote-login) ----------

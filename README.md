@@ -35,13 +35,17 @@ curl localhost:8080/health
 Или dev без образа:
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src -p 8080:8080 golang:1.23-alpine go run .
+docker run --rm -v "$PWD":/src -w /src -p 8080:8080 golang:1.25-alpine go run .
 ```
+
+Режимы: `DEMO_MODE=true` — read-only демо (записи → 403, отдаёт сид-данные); `APP_VERSION=vX` — версия для `/version` и сравнения в `/update`; первичная настройка — `POST /setup/claim` (создаёт admin-ключ в БД, если не задан `API_KEY`).
 
 ## Эндпоинты (контракт)
 
 ```
 GET   /health
+GET   /api/v1/setup            POST /api/v1/setup/claim     (first-run wizard: claim admin key)
+GET   /api/v1/version          GET  /api/v1/update          (build version + GitHub update check, cached ~1h)
 GET   /api/v1/books            GET /api/v1/books/{id}      GET /api/v1/books/{id}/file
 GET   /api/v1/shelves
 GET   /api/v1/books/{id}/progression     PUT /api/v1/books/{id}/progression
