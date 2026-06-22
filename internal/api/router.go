@@ -67,6 +67,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/pair/status", s.pairingStatus)
 
 	mux.HandleFunc("GET /api/v1/books", s.listBooks)
+	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
@@ -154,6 +155,17 @@ func (s *Server) demoGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// GET /api/v1/search?q=&limit= — full-text over book metadata + saved highlights (FTS5).
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	res, err := s.st.Search(r.URL.Query().Get("q"), limit)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf) ----------

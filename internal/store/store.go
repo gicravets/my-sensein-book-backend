@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/gicravets/my-sensein-book-backend/internal/model"
 	_ "modernc.org/sqlite"
@@ -96,6 +97,8 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS users      (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
 		CREATE TABLE IF NOT EXISTS smart_shelves (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(book_id UNINDEXED, title, authors, description, tags, tokenize='unicode61 remove_diacritics 2');
+		CREATE VIRTUAL TABLE IF NOT EXISTS annotations_fts USING fts5(annot_id UNINDEXED, book_id UNINDEXED, book_title UNINDEXED, disp_text UNINDEXED, disp_note UNINDEXED, text, note, tokenize='unicode61 remove_diacritics 2');
 		INSERT OR IGNORE INTO users(id,name,role,created) VALUES('` + OwnerID + `','owner','admin','` + time.Now().UTC().Format(time.RFC3339) + `');
 	`)
 	return err
@@ -589,6 +592,164 @@ func (s *Store) SmartShelfBooks(id string, page, size int) (model.Page[model.Boo
 	q.Page, q.Size = page, size
 	res, err := s.ListBooks(q)
 	return res, true, err
+}
+
+// ---------- full-text search (SQLite FTS5; unicode61 remove_diacritics folds ё/е) ----------
+
+// HighlightHit is a saved quote matched by search.
+type HighlightHit struct {
+	ID        string `json:"id"`
+	BookID    string `json:"bookId"`
+	BookTitle string `json:"bookTitle"`
+	Text      string `json:"text"`
+	Note      string `json:"note"`
+}
+
+// SearchResults bundles book and annotation matches.
+type SearchResults struct {
+	Books      []model.Book   `json:"books"`
+	Highlights []HighlightHit `json:"highlights"`
+}
+
+// Search runs a full-text query over book metadata and saved highlights. The FTS index
+// is rebuilt from current data per query (cheap for a personal/family library).
+func (s *Store) Search(q string, limit int) (SearchResults, error) {
+	out := SearchResults{Books: []model.Book{}, Highlights: []HighlightHit{}}
+	match := ftsMatch(q)
+	if match == "" {
+		return out, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if err := s.refreshFTS(); err != nil {
+		return out, err
+	}
+
+	// Collect ids first, then load books — never query while a cursor holds the
+	// single sqlite connection (MaxOpenConns(1)), or GetBook would deadlock.
+	var ids []string
+	brows, err := s.db.Query(`SELECT book_id FROM books_fts WHERE books_fts MATCH ? ORDER BY rank LIMIT ?`, match, limit)
+	if err != nil {
+		return out, err
+	}
+	for brows.Next() {
+		var id string
+		if brows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	brows.Close()
+	for _, id := range ids {
+		if b, ok, _ := s.GetBook(id); ok {
+			out.Books = append(out.Books, b)
+		}
+	}
+
+	hrows, err := s.db.Query(`SELECT annot_id, book_id, book_title, disp_text, disp_note FROM annotations_fts WHERE annotations_fts MATCH ? ORDER BY rank LIMIT ?`, match, limit)
+	if err != nil {
+		return out, err
+	}
+	defer hrows.Close()
+	for hrows.Next() {
+		var h HighlightHit
+		if hrows.Scan(&h.ID, &h.BookID, &h.BookTitle, &h.Text, &h.Note) == nil {
+			out.Highlights = append(out.Highlights, h)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) refreshFTS() error {
+	books, err := s.allBooks()
+	if err != nil {
+		return err
+	}
+	hls, err := s.allHighlights()
+	if err != nil {
+		return err
+	}
+	title := map[string]string{}
+	for _, b := range books {
+		title[b.ID] = b.Title
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM books_fts; DELETE FROM annotations_fts;`); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	for _, b := range books {
+		desc, pub := "", ""
+		if b.Description != nil {
+			desc = *b.Description
+		}
+		if b.Publisher != nil {
+			pub = *b.Publisher
+		}
+		if _, err := tx.Exec(`INSERT INTO books_fts(book_id,title,authors,description,tags) VALUES(?,?,?,?,?)`,
+			b.ID, foldRU(b.Title), foldRU(strings.Join(b.Authors, " ")), foldRU(desc), foldRU(strings.Join(b.Tags, " ")+" "+pub)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	for _, h := range hls {
+		note := ""
+		if h.Note != nil {
+			note = *h.Note
+		}
+		if _, err := tx.Exec(`INSERT INTO annotations_fts(annot_id,book_id,book_title,disp_text,disp_note,text,note) VALUES(?,?,?,?,?,?,?)`,
+			h.ID, h.BookID, title[h.BookID], h.Text, note, foldRU(h.Text), foldRU(note)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) allHighlights() ([]model.Highlight, error) {
+	rows, err := s.db.Query(`SELECT data FROM highlights`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.Highlight{}
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) == nil {
+			var h model.Highlight
+			if json.Unmarshal([]byte(raw), &h) == nil {
+				out = append(out, h)
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
+// foldRU folds Russian ё→е (FTS5 remove_diacritics doesn't fold Cyrillic in this build),
+// applied to both indexed text and queries so ёлка ↔ елка match either way.
+func foldRU(s string) string { return ruFolder.Replace(s) }
+
+var ruFolder = strings.NewReplacer("ё", "е", "Ё", "Е")
+
+// ftsMatch builds a prefix AND query from free text (letters/digits only, each term + '*').
+func ftsMatch(q string) string {
+	q = foldRU(q)
+	var terms []string
+	for _, t := range strings.Fields(q) {
+		var sb strings.Builder
+		for _, r := range t {
+			if unicode.IsLetter(r) || unicode.IsNumber(r) {
+				sb.WriteRune(r)
+			}
+		}
+		if sb.Len() > 0 {
+			terms = append(terms, sb.String()+"*")
+		}
+	}
+	return strings.Join(terms, " ")
 }
 
 func (s *Store) SetBookShelf(bookID, shelfID string, add bool) (model.Book, bool, error) {

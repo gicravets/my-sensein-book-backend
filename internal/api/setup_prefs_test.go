@@ -134,6 +134,54 @@ func TestSmartShelves(t *testing.T) {
 	}
 }
 
+func TestSearch(t *testing.T) {
+	h := newTestServer(t, Config{})
+	var res struct {
+		Books      []map[string]any `json:"books"`
+		Highlights []map[string]any `json:"highlights"`
+	}
+
+	// metadata: the seed library has "Pride and Prejudice" by Jane Austen
+	json.Unmarshal(do(t, h, "GET", "/api/v1/search?q=prejud", nil).Body.Bytes(), &res)
+	if len(res.Books) == 0 {
+		t.Errorf("expected a book match for 'prejud'")
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/search?q=austen", nil).Body.Bytes(), &res)
+	if len(res.Books) == 0 {
+		t.Errorf("expected an author match for 'austen'")
+	}
+
+	// annotation match + diacritic folding (ё -> е)
+	var page struct {
+		Content []struct {
+			ID string `json:"id"`
+		} `json:"content"`
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/books", nil).Body.Bytes(), &page)
+	if len(page.Content) == 0 {
+		t.Fatal("no seed books")
+	}
+	cr := do(t, h, "POST", "/api/v1/highlights", map[string]any{
+		"bookId": page.Content[0].ID, "text": "xyzzy ёлка", "color": "yellow",
+		"locator": map[string]any{"type": "cfi", "value": "x", "progression": 0},
+	})
+	if cr.Code != http.StatusCreated && cr.Code != http.StatusOK {
+		t.Fatalf("create highlight = %d", cr.Code)
+	}
+	// indexing: plain token must match
+	json.Unmarshal(do(t, h, "GET", "/api/v1/search?q=xyzzy", nil).Body.Bytes(), &res)
+	if len(res.Highlights) == 0 {
+		t.Errorf("expected highlight match for plain token 'xyzzy' (annotation indexing)")
+	}
+	// ё/е folding: query "елка" matches highlight "ёлка"; display keeps the original
+	json.Unmarshal(do(t, h, "GET", "/api/v1/search?q=елка", nil).Body.Bytes(), &res)
+	if len(res.Highlights) == 0 {
+		t.Errorf("expected ё/е-folded highlight match (елка ~ ёлка)")
+	} else if txt, _ := res.Highlights[0]["text"].(string); txt != "xyzzy ёлка" {
+		t.Errorf("display text folded; got %q want original 'xyzzy ёлка'", txt)
+	}
+}
+
 func TestSetupClaim(t *testing.T) {
 	h := newTestServer(t, Config{})
 
