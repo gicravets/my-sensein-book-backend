@@ -80,6 +80,11 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/shelves/{id}/books/{bookId}", s.addBookToShelf)
 	mux.HandleFunc("DELETE /api/v1/shelves/{id}/books/{bookId}", s.removeBookFromShelf)
 
+	mux.HandleFunc("GET /api/v1/smart-shelves", s.listSmartShelves)
+	mux.HandleFunc("POST /api/v1/smart-shelves", s.createSmartShelf)
+	mux.HandleFunc("DELETE /api/v1/smart-shelves/{id}", s.deleteSmartShelf)
+	mux.HandleFunc("GET /api/v1/smart-shelves/{id}/books", s.smartShelfBooks)
+
 	mux.HandleFunc("GET /api/v1/books/{id}/progression", s.getProgression)
 	mux.HandleFunc("PUT /api/v1/books/{id}/progression", s.putProgression)
 	mux.HandleFunc("PATCH /api/v1/books/{id}/read-progress", s.patchReadProgress)
@@ -149,6 +154,62 @@ func (s *Server) demoGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf) ----------
+
+func (s *Server) listSmartShelves(w http.ResponseWriter, r *http.Request) {
+	items, err := s.st.ListSmartShelves()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": items, "totalElements": len(items)})
+}
+
+func (s *Server) createSmartShelf(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name  string          `json:"name"`
+		Rules store.BookQuery `json:"rules"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		badRequest(w, fmt.Errorf("name required"))
+		return
+	}
+	sh, err := s.st.CreateSmartShelf(strings.TrimSpace(body.Name), body.Rules)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, sh)
+}
+
+func (s *Server) deleteSmartShelf(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteSmartShelf(r.PathValue("id")); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/v1/smart-shelves/{id}/books — evaluate the rule into a page of books.
+func (s *Server) smartShelfBooks(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
+	res, ok, err := s.st.SmartShelfBooks(r.PathValue("id"), page, size)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // ---------- reader preferences (per-user sync, Wave 1; ref: CWA CLIENT_SETTINGS_USER) ----------

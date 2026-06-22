@@ -81,6 +81,59 @@ func TestDemoReadOnly(t *testing.T) {
 	}
 }
 
+func TestSmartShelves(t *testing.T) {
+	h := newTestServer(t, Config{})
+
+	// create a rule-based shelf
+	w := do(t, h, "POST", "/api/v1/smart-shelves", map[string]any{
+		"name": "Unread", "rules": map[string]any{"filter": "unread"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create = %d want 201", w.Code)
+	}
+	var created struct{ ID, Name string }
+	json.Unmarshal(w.Body.Bytes(), &created)
+	if created.ID == "" || created.Name != "Unread" {
+		t.Fatalf("created = %+v", created)
+	}
+
+	// list
+	var list struct {
+		Content       []map[string]any `json:"content"`
+		TotalElements int              `json:"totalElements"`
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/smart-shelves", nil).Body.Bytes(), &list)
+	if list.TotalElements != 1 {
+		t.Errorf("list total = %d want 1", list.TotalElements)
+	}
+
+	// evaluate -> a page of books
+	w = do(t, h, "GET", "/api/v1/smart-shelves/"+created.ID+"/books", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("eval = %d want 200", w.Code)
+	}
+	var page struct {
+		Content []map[string]any `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatalf("eval decode: %v", err)
+	}
+
+	// missing shelf -> 404
+	if w := do(t, h, "GET", "/api/v1/smart-shelves/ss-nope/books", nil); w.Code != http.StatusNotFound {
+		t.Errorf("missing eval = %d want 404", w.Code)
+	}
+
+	// delete -> empty
+	if w := do(t, h, "DELETE", "/api/v1/smart-shelves/"+created.ID, nil); w.Code != http.StatusNoContent {
+		t.Errorf("delete = %d want 204", w.Code)
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/smart-shelves", nil).Body.Bytes(), &list)
+	if list.TotalElements != 0 {
+		t.Errorf("after delete total = %d want 0", list.TotalElements)
+	}
+}
+
 func TestSetupClaim(t *testing.T) {
 	h := newTestServer(t, Config{})
 

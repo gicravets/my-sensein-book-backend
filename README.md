@@ -48,6 +48,8 @@ GET   /api/v1/setup            POST /api/v1/setup/claim     (first-run wizard: c
 GET   /api/v1/version          GET  /api/v1/update          (build version + GitHub update check, cached ~1h)
 GET   /api/v1/books            GET /api/v1/books/{id}      GET /api/v1/books/{id}/file
 GET   /api/v1/shelves
+GET   /api/v1/smart-shelves     POST /api/v1/smart-shelves   DELETE /api/v1/smart-shelves/{id}   GET /api/v1/smart-shelves/{id}/books   (dynamic rule-based shelves)
+GET   /api/v1/preferences       PUT  /api/v1/preferences     (per-user reader settings sync)
 GET   /api/v1/books/{id}/progression     PUT /api/v1/books/{id}/progression
 PATCH /api/v1/books/{id}/read-progress
 GET   /api/v1/highlights       POST /api/v1/highlights

@@ -95,6 +95,7 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS users      (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
+		CREATE TABLE IF NOT EXISTS smart_shelves (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 		INSERT OR IGNORE INTO users(id,name,role,created) VALUES('` + OwnerID + `','owner','admin','` + time.Now().UTC().Format(time.RFC3339) + `');
 	`)
 	return err
@@ -305,18 +306,18 @@ func (s *Store) allBooks() ([]model.Book, error) {
 }
 
 type BookQuery struct {
-	Search    string
-	Shelf     string
-	Tag       string
-	Author    string
-	Series    string
-	Language  string
-	Publisher string
-	Format    string
-	Filter    string // "" | read | unread | archived | rated | downloaded | hot
-	Sort      string
-	Page      int
-	Size      int
+	Search    string `json:"search,omitempty"`
+	Shelf     string `json:"shelf,omitempty"`
+	Tag       string `json:"tag,omitempty"`
+	Author    string `json:"author,omitempty"`
+	Series    string `json:"series,omitempty"`
+	Language  string `json:"language,omitempty"`
+	Publisher string `json:"publisher,omitempty"`
+	Format    string `json:"format,omitempty"`
+	Filter    string `json:"filter,omitempty"` // "" | read | unread | archived | rated | downloaded | hot
+	Sort      string `json:"sort,omitempty"`
+	Page      int    `json:"-"`
+	Size      int    `json:"-"`
 }
 
 func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
@@ -525,6 +526,69 @@ func (s *Store) DeleteShelf(id string) error {
 		}
 	}
 	return nil
+}
+
+// ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf rules JSON) ----------
+
+// SmartShelf is a saved query: its books are computed by running Rules through ListBooks.
+type SmartShelf struct {
+	ID    string    `json:"id"`
+	Name  string    `json:"name"`
+	Rules BookQuery `json:"rules"`
+}
+
+func (s *Store) ListSmartShelves() ([]SmartShelf, error) {
+	rows, err := s.db.Query(`SELECT data FROM smart_shelves`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SmartShelf{}
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		var sh SmartShelf
+		if json.Unmarshal([]byte(raw), &sh) == nil {
+			out = append(out, sh)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, rows.Err()
+}
+
+func (s *Store) CreateSmartShelf(name string, rules BookQuery) (SmartShelf, error) {
+	rules.Page, rules.Size = 0, 0 // paging is per-request, not part of the rule
+	sh := SmartShelf{ID: "ss-" + newID(), Name: name, Rules: rules}
+	raw, _ := json.Marshal(sh)
+	_, err := s.db.Exec(`INSERT INTO smart_shelves(id,data) VALUES(?,?)`, sh.ID, string(raw))
+	return sh, err
+}
+
+func (s *Store) DeleteSmartShelf(id string) error {
+	_, err := s.db.Exec(`DELETE FROM smart_shelves WHERE id = ?`, id)
+	return err
+}
+
+// SmartShelfBooks evaluates a smart shelf's rules (with request paging) into a page of books.
+func (s *Store) SmartShelfBooks(id string, page, size int) (model.Page[model.Book], bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT data FROM smart_shelves WHERE id = ?`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return model.Page[model.Book]{}, false, nil
+	}
+	if err != nil {
+		return model.Page[model.Book]{}, false, err
+	}
+	var sh SmartShelf
+	if err := json.Unmarshal([]byte(raw), &sh); err != nil {
+		return model.Page[model.Book]{}, false, err
+	}
+	q := sh.Rules
+	q.Page, q.Size = page, size
+	res, err := s.ListBooks(q)
+	return res, true, err
 }
 
 func (s *Store) SetBookShelf(bookID, shelfID string, add bool) (model.Book, bool, error) {
