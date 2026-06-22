@@ -50,6 +50,15 @@ GET   /api/v1/highlights       POST /api/v1/highlights
 GET   /api/v1/bookmarks        POST /api/v1/bookmarks
 ```
 
+## Документы (вне этого репо)
+
+> Этот репозиторий — **только код**. Контракты, ресёрч по хранилищу, журналы и заметки для
+> агентов живут в `my-sensein-book-docs` (общий PWA/серверный раздел).
+> **Начни с** [`../my-sensein-book-docs/REGULATIONS.md`](../my-sensein-book-docs/).
+
+- Доки: [`../my-sensein-book-docs`](../my-sensein-book-docs/) ([GitHub](https://github.com/gicravets/my-sensein-book-docs)) — см. `AGENTS-backend.md`, `backend-storage-research.md`
+- Деплой всего стека: `docker compose up --build -d` (см. `docker-compose.yml` в этом репо)
+
 ## Связанные репозитории
 
 - Веб-PWA: [my-sensein-book-frontend](https://github.com/gicravets/my-sensein-book-frontend)
