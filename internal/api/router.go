@@ -95,6 +95,9 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/bookmarks", s.createBookmark)
 	mux.HandleFunc("DELETE /api/v1/bookmarks/{id}", s.deleteBookmark)
 
+	mux.HandleFunc("GET /api/v1/preferences", s.getPreferences)
+	mux.HandleFunc("PUT /api/v1/preferences", s.putPreferences)
+
 	return cors(logging(s.auth(s.demoGuard(mux))))
 }
 
@@ -146,6 +149,49 @@ func (s *Server) demoGuard(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// ---------- reader preferences (per-user sync, Wave 1; ref: CWA CLIENT_SETTINGS_USER) ----------
+
+// currentUser resolves the request's API key to a user id (Wave 0: always the owner).
+func (s *Server) currentUser(r *http.Request) string {
+	return s.st.UserForKey(r.Header.Get("X-API-Key"))
+}
+
+// GET /api/v1/preferences — the user's reader settings (theme/font/mode/…) as a JSON object.
+func (s *Server) getPreferences(w http.ResponseWriter, r *http.Request) {
+	prefs, err := s.st.GetPreferences(s.currentUser(r))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if prefs == nil {
+		prefs = map[string]json.RawMessage{}
+	}
+	writeJSON(w, http.StatusOK, prefs)
+}
+
+// PUT /api/v1/preferences — upsert reader settings (per-key last-writer-wins); returns the merged set.
+func (s *Server) putPreferences(w http.ResponseWriter, r *http.Request) {
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	user := s.currentUser(r)
+	if err := s.st.PutPreferences(user, body); err != nil {
+		serverError(w, err)
+		return
+	}
+	prefs, err := s.st.GetPreferences(user)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if prefs == nil {
+		prefs = map[string]json.RawMessage{}
+	}
+	writeJSON(w, http.StatusOK, prefs)
 }
 
 // ---------- setup wizard / version / update (ref: Komga claim + announcements, CWA update channel) ----------

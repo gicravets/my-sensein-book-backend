@@ -93,8 +93,59 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS devices   (id TEXT PRIMARY KEY, name TEXT NOT NULL, key TEXT NOT NULL UNIQUE, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS pairings  (token TEXT PRIMARY KEY, device_key TEXT, device_name TEXT, claimed INTEGER NOT NULL DEFAULT 0, expires TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS users      (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, created TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
+		INSERT OR IGNORE INTO users(id,name,role,created) VALUES('` + OwnerID + `','owner','admin','` + time.Now().UTC().Format(time.RFC3339) + `');
 	`)
 	return err
+}
+
+// ---------- identity (Wave 0: minimal — every key resolves to the single owner) ----------
+
+// OwnerID is the default single-owner user id. Per-user facets are scoped by user id
+// from day one so full multi-user later is incremental, not a rewrite.
+const OwnerID = "u-owner"
+
+// UserForKey resolves an API key (device/admin/master) to a user id. Today every valid
+// key maps to the owner; when multi-user lands, device keys resolve to their own user.
+func (s *Store) UserForKey(key string) string {
+	return OwnerID
+}
+
+// ---------- preferences (per-user KV, ref: CWA CLIENT_SETTINGS_USER) ----------
+
+// GetPreferences returns a user's reader settings as a key→raw-JSON map.
+func (s *Store) GetPreferences(userID string) (map[string]json.RawMessage, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM preferences WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]json.RawMessage{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = json.RawMessage(v)
+	}
+	return out, rows.Err()
+}
+
+// PutPreferences upserts each key in prefs for the user (last-writer-wins per key).
+func (s *Store) PutPreferences(userID string, prefs map[string]json.RawMessage) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	for k, v := range prefs {
+		if _, err := tx.Exec(`INSERT INTO preferences(user_id,key,value) VALUES(?,?,?)
+			ON CONFLICT(user_id,key) DO UPDATE SET value = excluded.value`, userID, k, string(v)); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ---------- settings (key/value, ref: Komga SERVER_SETTINGS) ----------
