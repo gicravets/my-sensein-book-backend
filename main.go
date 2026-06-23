@@ -24,8 +24,11 @@ var version = "dev"
 
 func main() {
 	dbPath := env("DB_PATH", "app.sqlite")
-	filesDir := env("FILES_DIR", filepath.Join(filepath.Dir(dbPath), "files"))
-	st, err := store.Open(dbPath, filesDir)
+	storage, err := buildStorage(dbPath)
+	if err != nil {
+		log.Fatalf("storage: %v", err)
+	}
+	st, err := store.Open(dbPath, storage)
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
@@ -76,6 +79,20 @@ func main() {
 		log.Printf("graceful shutdown failed: %v", err)
 	}
 	log.Println("stopped")
+}
+
+// buildStorage selects the file storage driver: local FS (default), S3-compatible, or WebDAV.
+func buildStorage(dbPath string) (store.Storage, error) {
+	switch env("STORAGE_DRIVER", "local") {
+	case "s3":
+		return store.NewS3Storage(env("S3_ENDPOINT", ""), env("S3_BUCKET", "books"),
+			env("S3_REGION", "us-east-1"), env("S3_KEY", ""), env("S3_SECRET", ""),
+			env("S3_SSL", "true") == "true")
+	case "webdav":
+		return store.NewWebDAVStorage(env("WEBDAV_URL", ""), env("WEBDAV_USER", ""), env("WEBDAV_PASS", ""))
+	default:
+		return store.NewLocalStorage(env("FILES_DIR", filepath.Join(filepath.Dir(dbPath), "files"))), nil
+	}
 }
 
 func env(key, fallback string) string {

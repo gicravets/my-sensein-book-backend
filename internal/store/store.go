@@ -7,8 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -23,23 +21,17 @@ import (
 // personal-scale library). Pure-Go driver (modernc.org/sqlite) keeps the binary
 // static (CGO_ENABLED=0) for a tiny distroless image.
 type Store struct {
-	db       *sql.DB
-	filesDir string
+	db      *sql.DB
+	storage Storage
 }
 
-func Open(dbPath, filesDir string) (*Store, error) {
+func Open(dbPath string, storage Storage) (*Store, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // sqlite single-writer
-	if err := os.MkdirAll(filepath.Join(filesDir, "books"), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.MkdirAll(filepath.Join(filesDir, "covers"), 0o755); err != nil {
-		return nil, err
-	}
-	s := &Store{db: db, filesDir: filesDir}
+	s := &Store{db: db, storage: storage}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -51,15 +43,15 @@ func Open(dbPath, filesDir string) (*Store, error) {
 	return s, nil
 }
 
-func (s *Store) bookPath(id string) string  { return filepath.Join(s.filesDir, "books", id+".epub") }
-func (s *Store) coverPath(id string) string { return filepath.Join(s.filesDir, "covers", id) }
+func bookKey(id string) string  { return "books/" + id + ".epub" }
+func coverKey(id string) string { return "covers/" + id }
 
 // SaveBookFile / SaveBookCover persist uploaded bytes; BookFile / BookCover read them.
-func (s *Store) SaveBookFile(id string, data []byte) error  { return os.WriteFile(s.bookPath(id), data, 0o644) }
-func (s *Store) SaveBookCover(id string, data []byte) error { return os.WriteFile(s.coverPath(id), data, 0o644) }
-func (s *Store) BookFile(id string) ([]byte, error)         { return os.ReadFile(s.bookPath(id)) }
-func (s *Store) BookCover(id string) ([]byte, error)        { return os.ReadFile(s.coverPath(id)) }
-func (s *Store) hasFile(id string) bool                     { _, err := os.Stat(s.bookPath(id)); return err == nil }
+func (s *Store) SaveBookFile(id string, data []byte) error  { return s.storage.Put(bookKey(id), data) }
+func (s *Store) SaveBookCover(id string, data []byte) error { return s.storage.Put(coverKey(id), data) }
+func (s *Store) BookFile(id string) ([]byte, error)         { return s.storage.Get(bookKey(id)) }
+func (s *Store) BookCover(id string) ([]byte, error)        { return s.storage.Get(coverKey(id)) }
+func (s *Store) hasFile(id string) bool                     { return s.storage.Has(bookKey(id)) }
 
 func (s *Store) SetRating(id string, rating int) (model.Book, bool, error) {
 	b, ok, err := s.GetBook(id)
@@ -541,8 +533,8 @@ func (s *Store) SoftDeleteBook(id string) (bool, error) {
 	if _, err := s.db.Exec(`DELETE FROM books WHERE id = ?`, id); err != nil {
 		return false, err
 	}
-	_ = os.Remove(s.bookPath(id))
-	_ = os.Remove(s.coverPath(id))
+	_ = s.storage.Delete(bookKey(id))
+	_ = s.storage.Delete(coverKey(id))
 	return true, nil
 }
 

@@ -40,6 +40,11 @@ docker run --rm -v "$PWD":/src -w /src -p 8080:8080 golang:1.25-alpine go run .
 
 Режимы: `DEMO_MODE=true` — read-only демо (записи → 403, отдаёт сид-данные); `APP_VERSION=vX` — версия для `/version` и сравнения в `/update`; первичная настройка — `POST /setup/claim` (создаёт admin-ключ в БД, если не задан `API_KEY`).
 
+**Файловое хранилище** (`STORAGE_DRIVER`):
+- `local` (по умолчанию) — `FILES_DIR`;
+- `s3` — S3-совместимое (AWS S3 / MinIO / R2): `S3_ENDPOINT S3_BUCKET S3_REGION S3_KEY S3_SECRET S3_SSL`;
+- `webdav` — `WEBDAV_URL WEBDAV_USER WEBDAV_PASS`.
+
 ## Эндпоинты (контракт)
 
 ```

@@ -15,7 +15,7 @@ import (
 func newTestServer(t *testing.T, cfg Config) http.Handler {
 	t.Helper()
 	tmp := t.TempDir()
-	st, err := store.Open(filepath.Join(tmp, "t.sqlite"), filepath.Join(tmp, "files"))
+	st, err := store.Open(filepath.Join(tmp, "t.sqlite"), store.NewLocalStorage(filepath.Join(tmp, "files")))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
