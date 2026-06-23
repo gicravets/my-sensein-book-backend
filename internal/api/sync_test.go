@@ -54,6 +54,38 @@ func TestEnrich(t *testing.T) {
 	}
 }
 
+func TestReadLists(t *testing.T) {
+	h := newTestServer(t, Config{})
+	var rl struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(do(t, h, "POST", "/api/v1/readlists", map[string]any{"name": "To read"}).Body.Bytes(), &rl)
+	if rl.ID == "" {
+		t.Fatal("no readlist id")
+	}
+	do(t, h, "POST", "/api/v1/readlists/"+rl.ID+"/books/bk-1", nil)
+	do(t, h, "POST", "/api/v1/readlists/"+rl.ID+"/books/bk-2", nil)
+
+	var page struct {
+		Content []struct {
+			ID string `json:"id"`
+		} `json:"content"`
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/readlists/"+rl.ID+"/books", nil).Body.Bytes(), &page)
+	if len(page.Content) != 2 || page.Content[0].ID != "bk-1" || page.Content[1].ID != "bk-2" {
+		t.Errorf("ordered books = %+v want [bk-1, bk-2]", page.Content)
+	}
+
+	do(t, h, "DELETE", "/api/v1/readlists/"+rl.ID+"/books/bk-1", nil)
+	json.Unmarshal(do(t, h, "GET", "/api/v1/readlists/"+rl.ID+"/books", nil).Body.Bytes(), &page)
+	if len(page.Content) != 1 || page.Content[0].ID != "bk-2" {
+		t.Errorf("after remove = %+v want [bk-2]", page.Content)
+	}
+	if w := do(t, h, "DELETE", "/api/v1/readlists/"+rl.ID, nil); w.Code != http.StatusNoContent {
+		t.Errorf("delete = %d want 204", w.Code)
+	}
+}
+
 func TestSeries(t *testing.T) {
 	h := newTestServer(t, Config{})
 

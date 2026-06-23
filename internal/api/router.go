@@ -102,6 +102,13 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("POST /api/v1/shelves/{id}/books/{bookId}", s.addBookToShelf)
 	mux.HandleFunc("DELETE /api/v1/shelves/{id}/books/{bookId}", s.removeBookFromShelf)
 
+	mux.HandleFunc("GET /api/v1/readlists", s.listReadLists)
+	mux.HandleFunc("POST /api/v1/readlists", s.createReadList)
+	mux.HandleFunc("DELETE /api/v1/readlists/{id}", s.deleteReadList)
+	mux.HandleFunc("GET /api/v1/readlists/{id}/books", s.readListBooks)
+	mux.HandleFunc("POST /api/v1/readlists/{id}/books/{bookId}", s.addToReadList)
+	mux.HandleFunc("DELETE /api/v1/readlists/{id}/books/{bookId}", s.removeFromReadList)
+
 	mux.HandleFunc("GET /api/v1/smart-shelves", s.listSmartShelves)
 	mux.HandleFunc("POST /api/v1/smart-shelves", s.createSmartShelf)
 	mux.HandleFunc("DELETE /api/v1/smart-shelves/{id}", s.deleteSmartShelf)
@@ -300,6 +307,80 @@ func (s *Server) syncDelta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"serverTime": serverTime, "books": changed, "removed": removed,
 	})
+}
+
+// ---------- read lists (ordered, cross-series; ref: Komga READLIST) ----------
+
+func (s *Server) listReadLists(w http.ResponseWriter, r *http.Request) {
+	items, err := s.st.ListReadLists()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": items, "totalElements": len(items)})
+}
+
+func (s *Server) createReadList(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		badRequest(w, fmt.Errorf("name required"))
+		return
+	}
+	rl, err := s.st.CreateReadList(strings.TrimSpace(body.Name))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, rl)
+}
+
+func (s *Server) deleteReadList(w http.ResponseWriter, r *http.Request) {
+	if err := s.st.DeleteReadList(r.PathValue("id")); err != nil {
+		serverError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) readListBooks(w http.ResponseWriter, r *http.Request) {
+	books, ok, err := s.st.ReadListBooks(s.currentUser(r), r.PathValue("id"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": books, "totalElements": len(books)})
+}
+
+func (s *Server) addToReadList(w http.ResponseWriter, r *http.Request) {
+	ok, err := s.st.AddToReadList(r.PathValue("id"), r.PathValue("bookId"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) removeFromReadList(w http.ResponseWriter, r *http.Request) {
+	ok, err := s.st.RemoveFromReadList(r.PathValue("id"), r.PathValue("bookId"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf) ----------

@@ -92,6 +92,7 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
 		CREATE TABLE IF NOT EXISTS progress (user_id TEXT NOT NULL, book_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(user_id, book_id));
 		CREATE TABLE IF NOT EXISTS smart_shelves (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS read_lists (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS tombstones (book_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
 		CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(book_id UNINDEXED, title, authors, description, tags, tokenize='unicode61 remove_diacritics 2');
 		CREATE VIRTUAL TABLE IF NOT EXISTS annotations_fts USING fts5(annot_id UNINDEXED, book_id UNINDEXED, book_title UNINDEXED, disp_text UNINDEXED, disp_note UNINDEXED, text, note, tokenize='unicode61 remove_diacritics 2');
@@ -743,6 +744,102 @@ func (s *Store) DeleteShelf(id string) error {
 		}
 	}
 	return nil
+}
+
+// ---------- read lists (ordered, cross-series; ref: Komga READLIST) ----------
+
+type ReadList struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	BookIDs []string `json:"bookIds"`
+}
+
+func (s *Store) ListReadLists() ([]ReadList, error) {
+	rows, err := s.db.Query(`SELECT data FROM read_lists`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ReadList{}
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) == nil {
+			var rl ReadList
+			if json.Unmarshal([]byte(raw), &rl) == nil {
+				out = append(out, rl)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, rows.Err()
+}
+
+func (s *Store) getReadList(id string) (ReadList, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT data FROM read_lists WHERE id = ?`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return ReadList{}, false, nil
+	}
+	if err != nil {
+		return ReadList{}, false, err
+	}
+	var rl ReadList
+	return rl, json.Unmarshal([]byte(raw), &rl) == nil, nil
+}
+
+func (s *Store) saveReadList(rl ReadList) error {
+	raw, _ := json.Marshal(rl)
+	_, err := s.db.Exec(`INSERT INTO read_lists(id,data) VALUES(?,?)
+		ON CONFLICT(id) DO UPDATE SET data = excluded.data`, rl.ID, string(raw))
+	return err
+}
+
+func (s *Store) CreateReadList(name string) (ReadList, error) {
+	rl := ReadList{ID: "rl-" + newID(), Name: name, BookIDs: []string{}}
+	return rl, s.saveReadList(rl)
+}
+
+func (s *Store) DeleteReadList(id string) error {
+	_, err := s.db.Exec(`DELETE FROM read_lists WHERE id = ?`, id)
+	return err
+}
+
+// AddToReadList appends a book (kept ordered, no duplicates).
+func (s *Store) AddToReadList(id, bookID string) (bool, error) {
+	rl, ok, err := s.getReadList(id)
+	if err != nil || !ok {
+		return ok, err
+	}
+	if !contains(rl.BookIDs, bookID) {
+		rl.BookIDs = append(rl.BookIDs, bookID)
+	}
+	return true, s.saveReadList(rl)
+}
+
+func (s *Store) RemoveFromReadList(id, bookID string) (bool, error) {
+	rl, ok, err := s.getReadList(id)
+	if err != nil || !ok {
+		return ok, err
+	}
+	rl.BookIDs = without(rl.BookIDs, bookID)
+	return true, s.saveReadList(rl)
+}
+
+// ReadListBooks returns the list's books in order, with the user's progress overlaid.
+func (s *Store) ReadListBooks(userID, id string) ([]model.Book, bool, error) {
+	rl, ok, err := s.getReadList(id)
+	if err != nil || !ok {
+		return nil, ok, err
+	}
+	prog := s.userProgressMap(userID)
+	out := []model.Book{}
+	for _, bid := range rl.BookIDs {
+		if b, found, _ := s.GetBook(bid); found {
+			b.ReadProgress = prog[b.ID]
+			out = append(out, b)
+		}
+	}
+	return out, true, nil
 }
 
 // ---------- series (multi-volume grouping; ref: Komga SERIES) ----------
