@@ -37,6 +37,68 @@ func do(t *testing.T, h http.Handler, method, path string, body any) *httptest.R
 	return w
 }
 
+func doKey(t *testing.T, h http.Handler, method, path, key string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var r *http.Request
+	if body != nil {
+		b, _ := json.Marshal(body)
+		r = httptest.NewRequest(method, path, bytes.NewReader(b))
+		r.Header.Set("Content-Type", "application/json")
+	} else {
+		r = httptest.NewRequest(method, path, nil)
+	}
+	if key != "" {
+		r.Header.Set("X-API-Key", key)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w
+}
+
+func TestUsersAndPerUserPrefs(t *testing.T) {
+	h := newTestServer(t, Config{})
+
+	// a device with no userId joins the owner
+	var d1 struct {
+		Key    string `json:"key"`
+		UserID string `json:"userId"`
+	}
+	json.Unmarshal(do(t, h, "POST", "/api/v1/auth/device", map[string]any{"name": "owner-phone"}).Body.Bytes(), &d1)
+	if d1.Key == "" || d1.UserID != "u-owner" {
+		t.Fatalf("owner device = %+v", d1)
+	}
+
+	// create a family user + a device that joins them
+	var u struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(do(t, h, "POST", "/api/v1/users", map[string]any{"name": "Аня"}).Body.Bytes(), &u)
+	if u.ID == "" {
+		t.Fatal("no user id")
+	}
+	var d2 struct {
+		Key    string `json:"key"`
+		UserID string `json:"userId"`
+	}
+	json.Unmarshal(do(t, h, "POST", "/api/v1/auth/device", map[string]any{"name": "anya-phone", "userId": u.ID}).Body.Bytes(), &d2)
+	if d2.Key == "" || d2.UserID != u.ID {
+		t.Fatalf("anya device = %+v", d2)
+	}
+
+	// per-user preferences are isolated by the device's user
+	doKey(t, h, "PUT", "/api/v1/preferences", d1.Key, map[string]any{"theme": "night"})
+	doKey(t, h, "PUT", "/api/v1/preferences", d2.Key, map[string]any{"theme": "sepia"})
+	var p1, p2 map[string]json.RawMessage
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/preferences", d1.Key, nil).Body.Bytes(), &p1)
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/preferences", d2.Key, nil).Body.Bytes(), &p2)
+	if string(p1["theme"]) != `"night"` {
+		t.Errorf("owner theme = %s want night", p1["theme"])
+	}
+	if string(p2["theme"]) != `"sepia"` {
+		t.Errorf("anya theme = %s want sepia", p2["theme"])
+	}
+}
+
 func TestPreferencesSync(t *testing.T) {
 	h := newTestServer(t, Config{Version: "v1.0.0"})
 

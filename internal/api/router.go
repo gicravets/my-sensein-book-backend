@@ -77,6 +77,8 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
 	mux.HandleFunc("DELETE /api/v1/devices/{id}", s.deleteDevice)
+	mux.HandleFunc("GET /api/v1/users", s.listUsers)
+	mux.HandleFunc("POST /api/v1/users", s.createUser)
 
 	mux.HandleFunc("GET /api/v1/shelves", s.listShelves)
 	mux.HandleFunc("POST /api/v1/shelves", s.createShelf)
@@ -404,9 +406,40 @@ func fetchLatestRelease(repo string) (tag, url string, ok bool) {
 	return rel.TagName, rel.HTMLURL, true
 }
 
-func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
+// GET /api/v1/users — family users; POST creates one (admin picks who a device pairs to).
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := s.st.ListUsers()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": users, "totalElements": len(users)})
+}
+
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	if strings.TrimSpace(body.Name) == "" {
+		badRequest(w, fmt.Errorf("name required"))
+		return
+	}
+	u, err := s.st.CreateUser(strings.TrimSpace(body.Name))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, u)
+}
+
+func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name   string `json:"name"`
+		UserID string `json:"userId"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if strings.TrimSpace(body.Name) == "" {
@@ -417,7 +450,7 @@ func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "master key required to register"})
 		return
 	}
-	d, err := s.st.RegisterDevice(strings.TrimSpace(body.Name))
+	d, err := s.st.RegisterDevice(strings.TrimSpace(body.Name), body.UserID)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -425,13 +458,13 @@ func (s *Server) registerDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, d)
 }
 
-// POST /api/v1/auth/pair — web (authed) creates a short-lived pairing token + QR payload.
+// POST /api/v1/auth/pair?userId= — web (authed) creates a short-lived pairing token + QR payload.
 func (s *Server) createPairing(w http.ResponseWriter, r *http.Request) {
 	if s.requireAuth && s.masterKey != "" && r.Header.Get("X-API-Key") != s.masterKey {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "master key required"})
 		return
 	}
-	p, err := s.st.CreatePairing(5 * time.Minute)
+	p, err := s.st.CreatePairing(5*time.Minute, r.URL.Query().Get("userId"))
 	if err != nil {
 		serverError(w, err)
 		return

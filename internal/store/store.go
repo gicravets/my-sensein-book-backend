@@ -43,6 +43,7 @@ func Open(dbPath, filesDir string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
+	s.ensureColumns()
 	if err := s.seedIfEmpty(); err != nil {
 		return nil, err
 	}
@@ -107,14 +108,74 @@ func (s *Store) migrate() error {
 
 // ---------- identity (Wave 0: minimal — every key resolves to the single owner) ----------
 
-// OwnerID is the default single-owner user id. Per-user facets are scoped by user id
-// from day one so full multi-user later is incremental, not a rewrite.
+// OwnerID is the default single-owner user id. Per-user facets are scoped by user id.
 const OwnerID = "u-owner"
 
-// UserForKey resolves an API key (device/admin/master) to a user id. Today every valid
-// key maps to the owner; when multi-user lands, device keys resolve to their own user.
+// UserForKey resolves an API key to a user id: a device key → that device's user;
+// the master/admin key or an unknown key → the owner.
 func (s *Store) UserForKey(key string) string {
+	var uid string
+	if s.db.QueryRow(`SELECT COALESCE(user_id, ?) FROM devices WHERE key = ?`, OwnerID, key).Scan(&uid) == nil && uid != "" {
+		return uid
+	}
 	return OwnerID
+}
+
+// ensureColumns adds user_id to older device/pairing tables (idempotent migration).
+func (s *Store) ensureColumns() {
+	addCol := func(table, col, def string) {
+		rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+		if err != nil {
+			return
+		}
+		has := false
+		for rows.Next() {
+			var cid, notnull, pk int
+			var name, ctype string
+			var dflt any
+			_ = rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk)
+			if name == col {
+				has = true
+			}
+		}
+		rows.Close()
+		if !has {
+			_, _ = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+		}
+	}
+	addCol("devices", "user_id", "TEXT NOT NULL DEFAULT '"+OwnerID+"'")
+	addCol("pairings", "user_id", "TEXT NOT NULL DEFAULT '"+OwnerID+"'")
+}
+
+// ---------- users (shared/family: users own devices; per-user state scoped by user id) ----------
+
+type User struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Role    string `json:"role"`
+	Created string `json:"created"`
+}
+
+func (s *Store) ListUsers() ([]User, error) {
+	rows, err := s.db.Query(`SELECT id, name, role, created FROM users ORDER BY created`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []User{}
+	for rows.Next() {
+		var u User
+		if rows.Scan(&u.ID, &u.Name, &u.Role, &u.Created) == nil {
+			out = append(out, u)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateUser(name string) (User, error) {
+	u := User{ID: "u-" + newID(), Name: name, Role: "member", Created: time.Now().UTC().Format(time.RFC3339)}
+	_, err := s.db.Exec(`INSERT INTO users(id,name,role,created) VALUES(?,?,?,?)`, u.ID, u.Name, u.Role, u.Created)
+	return u, err
 }
 
 // ---------- preferences (per-user KV, ref: CWA CLIENT_SETTINGS_USER) ----------
@@ -185,21 +246,24 @@ type Pairing struct {
 	Expires string `json:"expires"`
 }
 
-// CreatePairing makes a short-lived pending pairing token (default 5 min).
-func (s *Store) CreatePairing(ttl time.Duration) (Pairing, error) {
+// CreatePairing makes a short-lived pending pairing token (default 5 min) for a user.
+func (s *Store) CreatePairing(ttl time.Duration, userID string) (Pairing, error) {
+	if userID == "" {
+		userID = OwnerID
+	}
 	b := make([]byte, 16)
 	_, _ = cryptorand.Read(b)
 	p := Pairing{Token: hex.EncodeToString(b), Expires: time.Now().UTC().Add(ttl).Format(time.RFC3339)}
-	_, err := s.db.Exec(`INSERT INTO pairings(token,expires,created) VALUES(?,?,?)`,
-		p.Token, p.Expires, time.Now().UTC().Format(time.RFC3339))
+	_, err := s.db.Exec(`INSERT INTO pairings(token,expires,created,user_id) VALUES(?,?,?,?)`,
+		p.Token, p.Expires, time.Now().UTC().Format(time.RFC3339), userID)
 	return p, err
 }
 
-// ClaimPairing exchanges a valid pending token for a new device key.
+// ClaimPairing exchanges a valid pending token for a new device key (joined to the pairing's user).
 func (s *Store) ClaimPairing(token, name string) (Device, bool, error) {
-	var expires string
+	var expires, userID string
 	var claimed int
-	err := s.db.QueryRow(`SELECT expires, claimed FROM pairings WHERE token = ?`, token).Scan(&expires, &claimed)
+	err := s.db.QueryRow(`SELECT expires, claimed, COALESCE(user_id, ?) FROM pairings WHERE token = ?`, OwnerID, token).Scan(&expires, &claimed, &userID)
 	if err == sql.ErrNoRows {
 		return Device{}, false, nil
 	}
@@ -212,7 +276,7 @@ func (s *Store) ClaimPairing(token, name string) (Device, bool, error) {
 	if exp, e := time.Parse(time.RFC3339, expires); e == nil && time.Now().After(exp) {
 		return Device{}, false, nil // expired
 	}
-	d, err := s.RegisterDevice(name)
+	d, err := s.RegisterDevice(name, userID)
 	if err != nil {
 		return Device{}, false, err
 	}
@@ -244,19 +308,23 @@ type Device struct {
 	Name    string `json:"name"`
 	Key     string `json:"key"`
 	Created string `json:"created"`
+	UserID  string `json:"userId,omitempty"`
 }
 
-func (s *Store) RegisterDevice(name string) (Device, error) {
+func (s *Store) RegisterDevice(name, userID string) (Device, error) {
+	if userID == "" {
+		userID = OwnerID
+	}
 	b := make([]byte, 24)
 	_, _ = cryptorand.Read(b)
-	d := Device{ID: "dev-" + newID(), Name: name, Key: hex.EncodeToString(b), Created: time.Now().UTC().Format(time.RFC3339)}
-	_, err := s.db.Exec(`INSERT INTO devices(id,name,key,created) VALUES(?,?,?,?)`, d.ID, d.Name, d.Key, d.Created)
+	d := Device{ID: "dev-" + newID(), Name: name, Key: hex.EncodeToString(b), Created: time.Now().UTC().Format(time.RFC3339), UserID: userID}
+	_, err := s.db.Exec(`INSERT INTO devices(id,name,key,created,user_id) VALUES(?,?,?,?,?)`, d.ID, d.Name, d.Key, d.Created, userID)
 	return d, err
 }
 
 // ListDevices returns registered devices WITHOUT their keys (for a management UI).
 func (s *Store) ListDevices() ([]Device, error) {
-	rows, err := s.db.Query(`SELECT id, name, created FROM devices ORDER BY created DESC`)
+	rows, err := s.db.Query(`SELECT id, name, created, COALESCE(user_id,'') FROM devices ORDER BY created DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +332,7 @@ func (s *Store) ListDevices() ([]Device, error) {
 	out := []Device{}
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.ID, &d.Name, &d.Created); err != nil {
+		if err := rows.Scan(&d.ID, &d.Name, &d.Created, &d.UserID); err != nil {
 			return nil, err
 		}
 		out = append(out, d) // Key intentionally left empty
