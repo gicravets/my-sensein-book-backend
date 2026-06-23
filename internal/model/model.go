@@ -56,6 +56,7 @@ type Shelf struct {
 	Kind      string `json:"kind"` // "normal" | "smart"
 	BookCount int    `json:"bookCount"`
 	IsPublic  bool   `json:"isPublic"`
+	OwnerID   string `json:"ownerId,omitempty"` // shelf owner; "" = legacy shared shelf
 }
 
 type Locator struct {

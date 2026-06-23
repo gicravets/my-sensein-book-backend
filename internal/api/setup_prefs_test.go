@@ -157,6 +157,57 @@ func TestPerUserProgress(t *testing.T) {
 	}
 }
 
+func TestShelfSharing(t *testing.T) {
+	h := newTestServer(t, Config{})
+	mk := func(name string) string {
+		var u struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(do(t, h, "POST", "/api/v1/users", map[string]any{"name": name}).Body.Bytes(), &u)
+		var d struct {
+			Key string `json:"key"`
+		}
+		json.Unmarshal(do(t, h, "POST", "/api/v1/auth/device", map[string]any{"name": name + "-d", "userId": u.ID}).Body.Bytes(), &d)
+		return d.Key
+	}
+	ka, kb := mk("A"), mk("B")
+
+	var sh struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(doKey(t, h, "POST", "/api/v1/shelves", ka, map[string]any{"name": "A private"}).Body.Bytes(), &sh)
+	if sh.ID == "" {
+		t.Fatal("no shelf id")
+	}
+
+	has := func(key, id string) bool {
+		var l struct {
+			Content []struct {
+				ID string `json:"id"`
+			} `json:"content"`
+		}
+		json.Unmarshal(doKey(t, h, "GET", "/api/v1/shelves", key, nil).Body.Bytes(), &l)
+		for _, s := range l.Content {
+			if s.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(ka, sh.ID) {
+		t.Error("A cannot see own shelf")
+	}
+	if has(kb, sh.ID) {
+		t.Error("B sees A's private shelf")
+	}
+
+	// A shares it (public) -> B sees it
+	doKey(t, h, "PATCH", "/api/v1/shelves/"+sh.ID, ka, map[string]any{"isPublic": true})
+	if !has(kb, sh.ID) {
+		t.Error("B cannot see A's public shelf")
+	}
+}
+
 func TestPreferencesSync(t *testing.T) {
 	h := newTestServer(t, Config{Version: "v1.0.0"})
 

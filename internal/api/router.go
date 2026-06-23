@@ -82,6 +82,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 
 	mux.HandleFunc("GET /api/v1/shelves", s.listShelves)
 	mux.HandleFunc("POST /api/v1/shelves", s.createShelf)
+	mux.HandleFunc("PATCH /api/v1/shelves/{id}", s.patchShelf)
 	mux.HandleFunc("DELETE /api/v1/shelves/{id}", s.deleteShelf)
 	mux.HandleFunc("POST /api/v1/shelves/{id}/books/{bookId}", s.addBookToShelf)
 	mux.HandleFunc("DELETE /api/v1/shelves/{id}/books/{bookId}", s.removeBookFromShelf)
@@ -665,13 +666,34 @@ func (s *Server) getBookCover(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
-func (s *Server) listShelves(w http.ResponseWriter, _ *http.Request) {
-	shelves, err := s.st.ListShelves()
+func (s *Server) listShelves(w http.ResponseWriter, r *http.Request) {
+	shelves, err := s.st.ListShelves(s.currentUser(r))
 	if err != nil {
 		serverError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"content": shelves, "totalElements": len(shelves)})
+}
+
+// PATCH /api/v1/shelves/{id} { isPublic } — share a shelf with the family (public) or unshare.
+func (s *Server) patchShelf(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IsPublic bool `json:"isPublic"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		badRequest(w, err)
+		return
+	}
+	sh, ok, err := s.st.SetShelfPublic(r.PathValue("id"), body.IsPublic)
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, sh)
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, _ *http.Request) {
@@ -699,7 +721,7 @@ func (s *Server) createShelf(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, fmt.Errorf("name required"))
 		return
 	}
-	sh, err := s.st.CreateShelf(strings.TrimSpace(body.Name))
+	sh, err := s.st.CreateShelf(strings.TrimSpace(body.Name), s.currentUser(r))
 	if err != nil {
 		serverError(w, err)
 		return

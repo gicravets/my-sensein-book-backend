@@ -670,7 +670,8 @@ func (s *Store) SetCompleted(userID, id string, completed bool) (*model.ReadProg
 
 // ---------- shelves ----------
 
-func (s *Store) ListShelves() ([]model.Shelf, error) {
+// ListShelves returns shelves visible to a user: their own + public + legacy shared ("" owner).
+func (s *Store) ListShelves(userID string) ([]model.Shelf, error) {
 	rows, err := s.db.Query(`SELECT data FROM shelves`)
 	if err != nil {
 		return nil, err
@@ -686,7 +687,9 @@ func (s *Store) ListShelves() ([]model.Shelf, error) {
 		if err := json.Unmarshal([]byte(raw), &sh); err != nil {
 			return nil, err
 		}
-		shelves = append(shelves, sh)
+		if sh.OwnerID == "" || sh.OwnerID == userID || sh.IsPublic {
+			shelves = append(shelves, sh)
+		}
 	}
 	books, _ := s.allBooks()
 	for i := range shelves {
@@ -705,11 +708,34 @@ func (s *Store) ListShelves() ([]model.Shelf, error) {
 	return shelves, rows.Err()
 }
 
-func (s *Store) CreateShelf(name string) (model.Shelf, error) {
-	sh := model.Shelf{ID: "sh-" + newID(), Name: name, Kind: "normal", IsPublic: false}
+func (s *Store) CreateShelf(name, ownerID string) (model.Shelf, error) {
+	if ownerID == "" {
+		ownerID = OwnerID
+	}
+	sh := model.Shelf{ID: "sh-" + newID(), Name: name, Kind: "normal", IsPublic: false, OwnerID: ownerID}
 	raw, _ := json.Marshal(sh)
 	_, err := s.db.Exec(`INSERT INTO shelves(id,data) VALUES(?,?)`, sh.ID, string(raw))
 	return sh, err
+}
+
+// SetShelfPublic toggles a shelf's public (shared-with-family) flag.
+func (s *Store) SetShelfPublic(id string, public bool) (model.Shelf, bool, error) {
+	var raw string
+	err := s.db.QueryRow(`SELECT data FROM shelves WHERE id = ?`, id).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return model.Shelf{}, false, nil
+	}
+	if err != nil {
+		return model.Shelf{}, false, err
+	}
+	var sh model.Shelf
+	if err := json.Unmarshal([]byte(raw), &sh); err != nil {
+		return model.Shelf{}, false, err
+	}
+	sh.IsPublic = public
+	out, _ := json.Marshal(sh)
+	_, err = s.db.Exec(`UPDATE shelves SET data = ? WHERE id = ?`, string(out), id)
+	return sh, true, err
 }
 
 func (s *Store) DeleteShelf(id string) error {

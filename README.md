@@ -52,7 +52,7 @@ DELETE /api/v1/books/{id}       (soft delete + tombstone)
 GET   /api/v1/sync?since=       (library delta: changed books + removed ids + serverTime — sync-point)
 GET   /api/v1/users           POST /api/v1/users           (family users; admin creates them)
 POST  /api/v1/auth/pair?userId=   (pair a device to a specific user; device key resolves to that user)
-GET   /api/v1/shelves
+GET   /api/v1/shelves          POST /api/v1/shelves   PATCH /api/v1/shelves/{id} {isPublic}   (per-user + public/shared shelves)
 GET   /api/v1/smart-shelves     POST /api/v1/smart-shelves   DELETE /api/v1/smart-shelves/{id}   GET /api/v1/smart-shelves/{id}/books   (dynamic rule-based shelves)
 GET   /api/v1/preferences       PUT  /api/v1/preferences     (per-user reader settings sync)
 GET   /api/v1/books/{id}/progression     PUT /api/v1/books/{id}/progression   (per-user)
