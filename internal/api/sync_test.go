@@ -24,6 +24,38 @@ func uploadBook(t *testing.T, h http.Handler, name string, content []byte) *http
 	return w
 }
 
+func TestSeries(t *testing.T) {
+	h := newTestServer(t, Config{})
+
+	var res struct {
+		Content []struct {
+			Name      string `json:"name"`
+			BookCount int    `json:"bookCount"`
+		} `json:"content"`
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/series", nil).Body.Bytes(), &res)
+	found := false
+	for _, s := range res.Content {
+		if s.Name == "Война и мир" {
+			found = true
+			if s.BookCount != 2 {
+				t.Errorf("series book count = %d want 2", s.BookCount)
+			}
+		}
+	}
+	if !found {
+		t.Error("series 'Война и мир' not listed")
+	}
+
+	var page struct {
+		TotalElements int `json:"totalElements"`
+	}
+	json.Unmarshal(do(t, h, "GET", "/api/v1/books?series="+url.QueryEscape("Война и мир"), nil).Body.Bytes(), &page)
+	if page.TotalElements != 2 {
+		t.Errorf("books in series = %d want 2", page.TotalElements)
+	}
+}
+
 func TestLibrarySync(t *testing.T) {
 	h := newTestServer(t, Config{})
 	content := []byte("hello epub bytes — unique-xyz")

@@ -753,6 +753,51 @@ func (s *Store) DeleteShelf(id string) error {
 	return nil
 }
 
+// ---------- series (multi-volume grouping; ref: Komga SERIES) ----------
+
+type SeriesInfo struct {
+	Name      string `json:"name"`
+	BookCount int    `json:"bookCount"`
+	CoverSeed string `json:"coverSeed,omitempty"`
+}
+
+// ListSeries groups the library's books by their Series metadata (cover = first volume).
+func (s *Store) ListSeries() ([]SeriesInfo, error) {
+	books, err := s.allBooks()
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(books, func(i, j int) bool {
+		bi, bj := 0.0, 0.0
+		if books[i].SeriesIndex != nil {
+			bi = *books[i].SeriesIndex
+		}
+		if books[j].SeriesIndex != nil {
+			bj = *books[j].SeriesIndex
+		}
+		return bi < bj
+	})
+	idx := map[string]*SeriesInfo{}
+	order := []string{}
+	for _, b := range books {
+		if b.Series == nil || *b.Series == "" {
+			continue
+		}
+		name := *b.Series
+		if idx[name] == nil {
+			idx[name] = &SeriesInfo{Name: name, CoverSeed: b.CoverSeed}
+			order = append(order, name)
+		}
+		idx[name].BookCount++
+	}
+	out := []SeriesInfo{}
+	for _, n := range order {
+		out = append(out, *idx[n])
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf rules JSON) ----------
 
 // SmartShelf is a saved query: its books are computed by running Rules through ListBooks.

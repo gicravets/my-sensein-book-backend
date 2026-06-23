@@ -69,6 +69,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 
 	mux.HandleFunc("GET /api/v1/books", s.listBooks)
 	mux.HandleFunc("GET /api/v1/search", s.search)
+	mux.HandleFunc("GET /api/v1/series", s.listSeries)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("DELETE /api/v1/books/{id}", s.deleteBook)
@@ -172,6 +173,16 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// GET /api/v1/series — multi-volume groupings (book metadata Series). Books via ?series=.
+func (s *Server) listSeries(w http.ResponseWriter, r *http.Request) {
+	series, err := s.st.ListSeries()
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"content": series, "totalElements": len(series)})
 }
 
 // DELETE /api/v1/books/{id} — soft delete; records a tombstone so the removal syncs.

@@ -61,6 +61,10 @@ func (s *Store) seedIfEmpty() error {
 			Size: 1200000, Language: sp("ru"), Tags: []string{"classic"}, AddedAt: "2026-06-10T10:00:00Z",
 			CoverSeed: "Преступление и наказание", ShelfIDs: []string{"sh-classics"},
 			ReadProgress: rp(0.12, 0.22, 130, 600, false, "2026-06-15T09:00:00Z", "My.Sensein.Book iPhone")},
+		{ID: "bk-7", Title: "Война и мир. Том 2", Authors: []string{"Лев Толстой"}, Format: "EPUB",
+			Size: 1200000, Language: sp("ru"), Series: sp("Война и мир"), SeriesIndex: fp(2),
+			Tags: []string{"classic", "epic"}, AddedAt: "2026-06-10T10:00:00Z", CoverSeed: "Война и мир. Том 2",
+			ShelfIDs: []string{"sh-classics"}},
 	}
 	for i := range books {
 		if books[i].Authors == nil {
