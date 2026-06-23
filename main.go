@@ -41,6 +41,7 @@ func main() {
 		Demo:        demo,
 		Version:     env("APP_VERSION", version),
 		Repo:        env("UPDATE_REPO", "gicravets/my-sensein-book-backend"),
+		MetaBase:    env("META_BASE", "https://openlibrary.org"),
 	}
 	addr := ":" + env("PORT", "8080")
 	srv := &http.Server{

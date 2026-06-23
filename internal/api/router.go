@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,7 @@ type Config struct {
 	Demo        bool   // read-only demo deployment (writes are blocked)
 	Version     string // build version, surfaced by GET /version
 	Repo        string // GitHub owner/repo for the update check
+	MetaBase    string // metadata provider base URL (Open Library); overridable for tests
 }
 
 // Server holds dependencies for the HTTP handlers.
@@ -39,6 +41,7 @@ type Server struct {
 	demo        bool
 	version     string
 	repo        string
+	metaBase    string
 	fbMu        sync.Mutex
 	fbCache     map[string][]byte // id -> FB2-converted EPUB
 	upMu        sync.Mutex
@@ -51,9 +54,14 @@ type Server struct {
 // (device key, DB admin key, or masterKey); /health, /setup, /version, /update and
 // device registration stay open. In demo mode all writes are blocked.
 func NewRouter(st *store.Store, cfg Config) http.Handler {
+	metaBase := cfg.MetaBase
+	if metaBase == "" {
+		metaBase = "https://openlibrary.org"
+	}
 	s := &Server{
 		st: st, bookFile: cfg.BookFile, requireAuth: cfg.RequireAuth,
 		masterKey: cfg.MasterKey, demo: cfg.Demo, version: cfg.Version, repo: cfg.Repo,
+		metaBase: metaBase,
 	}
 	mux := http.NewServeMux()
 
@@ -74,6 +82,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("DELETE /api/v1/books/{id}", s.deleteBook)
 	mux.HandleFunc("GET /api/v1/sync", s.syncDelta)
+	mux.HandleFunc("POST /api/v1/books/{id}/enrich", s.enrichBook)
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
 	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
@@ -173,6 +182,82 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// POST /api/v1/books/{id}/enrich — fetch a cover + description from Open Library by
+// title/author and fill any missing fields. Best-effort: returns {book, enriched}.
+func (s *Server) enrichBook(w http.ResponseWriter, r *http.Request) {
+	b, ok, err := s.st.GetBook(r.PathValue("id"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	author := ""
+	if len(b.Authors) > 0 {
+		author = b.Authors[0]
+	}
+	meta, found := searchOpenLibrary(&http.Client{Timeout: 8 * time.Second}, s.metaBase, b.Title, author)
+	enriched := false
+	if found {
+		if meta.Description != "" && (b.Description == nil || *b.Description == "") {
+			b.Description = &meta.Description
+			enriched = true
+		}
+		if meta.CoverURL != "" && (b.CoverURL == nil || *b.CoverURL == "") {
+			b.CoverURL = &meta.CoverURL
+			enriched = true
+		}
+		if enriched {
+			_ = s.st.SaveBook(b)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"book": b, "enriched": enriched})
+}
+
+type metaResult struct {
+	Description string
+	CoverURL    string
+}
+
+// searchOpenLibrary queries Open Library's search.json for a cover id + first sentence.
+func searchOpenLibrary(client *http.Client, base, title, author string) (metaResult, bool) {
+	if title == "" {
+		return metaResult{}, false
+	}
+	u := base + "/search.json?limit=1&title=" + url.QueryEscape(title)
+	if author != "" {
+		u += "&author=" + url.QueryEscape(author)
+	}
+	resp, err := client.Get(u)
+	if err != nil {
+		return metaResult{}, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return metaResult{}, false
+	}
+	var data struct {
+		Docs []struct {
+			CoverI        int      `json:"cover_i"`
+			FirstSentence []string `json:"first_sentence"`
+		} `json:"docs"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&data) != nil || len(data.Docs) == 0 {
+		return metaResult{}, false
+	}
+	d := data.Docs[0]
+	var res metaResult
+	if len(d.FirstSentence) > 0 {
+		res.Description = d.FirstSentence[0]
+	}
+	if d.CoverI > 0 {
+		res.CoverURL = fmt.Sprintf("https://covers.openlibrary.org/b/id/%d-L.jpg", d.CoverI)
+	}
+	return res, res.Description != "" || res.CoverURL != ""
 }
 
 // GET /api/v1/series — multi-volume groupings (book metadata Series). Books via ?series=.

@@ -49,6 +49,7 @@ GET   /api/v1/version          GET  /api/v1/update          (build version + Git
 GET   /api/v1/books            GET /api/v1/books/{id}      GET /api/v1/books/{id}/file
 GET   /api/v1/search           (full-text over book metadata + saved quotes; FTS5, ё/е-folded)
 GET   /api/v1/series           (multi-volume groupings; books via GET /api/v1/books?series=Name)
+POST  /api/v1/books/{id}/enrich (fetch cover + description from Open Library; fills missing fields)
 DELETE /api/v1/books/{id}       (soft delete + tombstone)
 GET   /api/v1/sync?since=       (library delta: changed books + removed ids + serverTime — sync-point)
 GET   /api/v1/users           POST /api/v1/users           (family users; admin creates them)

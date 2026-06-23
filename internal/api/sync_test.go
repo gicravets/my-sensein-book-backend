@@ -24,6 +24,36 @@ func uploadBook(t *testing.T, h http.Handler, name string, content []byte) *http
 	return w
 }
 
+func TestEnrich(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"docs":[{"cover_i":42,"first_sentence":["A canned first sentence."]}]}`))
+	}))
+	defer mock.Close()
+
+	h := newTestServer(t, Config{MetaBase: mock.URL})
+	w := do(t, h, "POST", "/api/v1/books/bk-1/enrich", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enrich = %d want 200", w.Code)
+	}
+	var res struct {
+		Enriched bool `json:"enriched"`
+		Book     struct {
+			Description *string `json:"description"`
+			CoverURL    *string `json:"coverUrl"`
+		} `json:"book"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if !res.Enriched {
+		t.Error("expected enriched true")
+	}
+	if res.Book.CoverURL == nil || *res.Book.CoverURL == "" {
+		t.Error("cover not set")
+	}
+	if res.Book.Description == nil || *res.Book.Description == "" {
+		t.Error("description not set")
+	}
+}
+
 func TestSeries(t *testing.T) {
 	h := newTestServer(t, Config{})
 
