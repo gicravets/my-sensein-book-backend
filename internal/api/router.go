@@ -2,6 +2,7 @@ package api
 
 import (
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -70,6 +71,8 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
+	mux.HandleFunc("DELETE /api/v1/books/{id}", s.deleteBook)
+	mux.HandleFunc("GET /api/v1/sync", s.syncDelta)
 	mux.HandleFunc("GET /api/v1/books/{id}/file", s.getBookFile)
 	mux.HandleFunc("GET /api/v1/books/{id}/cover", s.getBookCover)
 	mux.HandleFunc("GET /api/v1/devices", s.listDevices)
@@ -166,6 +169,33 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+// DELETE /api/v1/books/{id} — soft delete; records a tombstone so the removal syncs.
+func (s *Server) deleteBook(w http.ResponseWriter, r *http.Request) {
+	ok, err := s.st.SoftDeleteBook(r.PathValue("id"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	if !ok {
+		notFound(w)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// GET /api/v1/sync?since= — library delta since a device's sync point (ref: Komga SYNC_POINT).
+// Returns changed/added books, ids removed since, and the serverTime to store as the next point.
+func (s *Server) syncDelta(w http.ResponseWriter, r *http.Request) {
+	changed, removed, serverTime, err := s.st.SyncDelta(r.URL.Query().Get("since"))
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"serverTime": serverTime, "books": changed, "removed": removed,
+	})
 }
 
 // ---------- smart shelves (dynamic, rule-based; ref: CWA magic_shelf) ----------
@@ -497,6 +527,13 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// content hash → dedup: if the same file is already here, return it (no duplicate)
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	if existing, ok := s.st.FindBookByHash(hash); ok {
+		writeJSON(w, http.StatusOK, existing)
+		return
+	}
+
 	meta, _ := epub.Parse(data) // best-effort (EPUB)
 	format := model.FormatEPUB
 	if fb2.IsFB2(data) { // FB2: parse its own metadata
@@ -518,7 +555,7 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	b := model.Book{
 		ID: id, Title: title, Authors: authors, Format: format,
 		Size: int64(len(data)), AddedAt: now, CoverSeed: title,
-		Tags: []string{}, ShelfIDs: []string{},
+		Tags: []string{}, ShelfIDs: []string{}, FileHash: hash,
 	}
 	if meta.Language != "" {
 		b.Language = &meta.Language

@@ -97,6 +97,7 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS users      (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
 		CREATE TABLE IF NOT EXISTS smart_shelves (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+		CREATE TABLE IF NOT EXISTS tombstones (book_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
 		CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(book_id UNINDEXED, title, authors, description, tags, tokenize='unicode61 remove_diacritics 2');
 		CREATE VIRTUAL TABLE IF NOT EXISTS annotations_fts USING fts5(annot_id UNINDEXED, book_id UNINDEXED, book_title UNINDEXED, disp_text UNINDEXED, disp_note UNINDEXED, text, note, tokenize='unicode61 remove_diacritics 2');
 		INSERT OR IGNORE INTO users(id,name,role,created) VALUES('` + OwnerID + `','owner','admin','` + time.Now().UTC().Format(time.RFC3339) + `');
@@ -428,10 +429,77 @@ func (s *Store) GetBook(id string) (model.Book, bool, error) {
 }
 
 func (s *Store) SaveBook(b model.Book) error {
+	b.UpdatedAt = time.Now().UTC().Format(syncTimeFmt) // touch for the sync delta
 	raw, _ := json.Marshal(b)
 	_, err := s.db.Exec(`INSERT INTO books(id,data) VALUES(?,?)
 		ON CONFLICT(id) DO UPDATE SET data=excluded.data`, b.ID, string(raw))
 	return err
+}
+
+// syncTimeFmt is fixed-width (9 fractional digits) so string/SQL "since" comparison is correct.
+const syncTimeFmt = "2006-01-02T15:04:05.000000000Z"
+
+// FindBookByHash returns a book with the given file hash, if any (upload dedup).
+func (s *Store) FindBookByHash(hash string) (model.Book, bool) {
+	if hash == "" {
+		return model.Book{}, false
+	}
+	books, _ := s.allBooks()
+	for _, b := range books {
+		if b.FileHash == hash {
+			return b, true
+		}
+	}
+	return model.Book{}, false
+}
+
+// SoftDeleteBook removes a book and records a tombstone so the deletion syncs to clients.
+func (s *Store) SoftDeleteBook(id string) (bool, error) {
+	if _, ok, _ := s.GetBook(id); !ok {
+		return false, nil
+	}
+	now := time.Now().UTC().Format(syncTimeFmt)
+	if _, err := s.db.Exec(`INSERT INTO tombstones(book_id,deleted_at) VALUES(?,?)
+		ON CONFLICT(book_id) DO UPDATE SET deleted_at=excluded.deleted_at`, id, now); err != nil {
+		return false, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM books WHERE id = ?`, id); err != nil {
+		return false, err
+	}
+	_ = os.Remove(s.bookPath(id))
+	_ = os.Remove(s.coverPath(id))
+	return true, nil
+}
+
+// SyncDelta returns books changed since `since` (RFC3339; empty = all) plus the ids
+// deleted since then, and the server time to use as the next sync point. (ref: Komga SYNC_POINT)
+func (s *Store) SyncDelta(since string) (changed []model.Book, removed []string, serverTime string, err error) {
+	serverTime = time.Now().UTC().Format(syncTimeFmt)
+	books, err := s.allBooks()
+	if err != nil {
+		return nil, nil, serverTime, err
+	}
+	changed = []model.Book{}
+	for _, b := range books {
+		if since == "" || b.UpdatedAt == "" || b.UpdatedAt > since {
+			changed = append(changed, b)
+		}
+	}
+	removed = []string{}
+	if since != "" {
+		rows, e := s.db.Query(`SELECT book_id FROM tombstones WHERE deleted_at > ?`, since)
+		if e != nil {
+			return changed, removed, serverTime, e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				removed = append(removed, id)
+			}
+		}
+	}
+	return changed, removed, serverTime, nil
 }
 
 // PutProgression updates a book's reading position; auto-marks completed near the end.

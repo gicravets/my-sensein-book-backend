@@ -46,6 +46,8 @@ type Book struct {
 	ShelfIDs      []string      `json:"shelfIds"`
 	Rating        int           `json:"rating"`
 	Archived      bool          `json:"archived"`
+	FileHash      string        `json:"fileHash,omitempty"`  // sha256 of the book file (dedup + change detection)
+	UpdatedAt     string        `json:"updatedAt,omitempty"` // RFC3339, touched on every save (sync delta)
 }
 
 type Shelf struct {
