@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -154,6 +155,33 @@ func TestPerUserProgress(t *testing.T) {
 		if bk.ID == bid && (bk.ReadProgress == nil || bk.ReadProgress["totalProgression"] != 0.5) {
 			t.Errorf("A list overlay missing progress for %s: %v", bid, bk.ReadProgress)
 		}
+	}
+}
+
+func TestWatchedFolder(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "newbook.epub"), []byte("some epub bytes watch-xyz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newTestServer(t, Config{WatchDir: dir})
+
+	var res struct {
+		Imported int `json:"imported"`
+	}
+	json.Unmarshal(do(t, h, "POST", "/api/v1/library/scan", nil).Body.Bytes(), &res)
+	if res.Imported != 1 {
+		t.Errorf("imported = %d want 1", res.Imported)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "newbook.epub")); !os.IsNotExist(err) {
+		t.Error("file not moved out of the watch dir")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".imported", "newbook.epub")); err != nil {
+		t.Error("file not moved to .imported")
+	}
+	// re-scan imports nothing new
+	json.Unmarshal(do(t, h, "POST", "/api/v1/library/scan", nil).Body.Bytes(), &res)
+	if res.Imported != 0 {
+		t.Errorf("re-scan imported = %d want 0", res.Imported)
 	}
 }
 

@@ -42,6 +42,15 @@ func main() {
 		Version:     env("APP_VERSION", version),
 		Repo:        env("UPDATE_REPO", "gicravets/my-sensein-book-backend"),
 		MetaBase:    env("META_BASE", "https://openlibrary.org"),
+		WatchDir:    env("WATCH_DIR", ""),
+	}
+	if cfg.WatchDir != "" {
+		go func() {
+			for {
+				api.ScanWatchDir(st, cfg.WatchDir)
+				time.Sleep(30 * time.Second)
+			}
+		}()
 	}
 	addr := ":" + env("PORT", "8080")
 	srv := &http.Server{

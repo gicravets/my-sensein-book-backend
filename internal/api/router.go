@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ type Config struct {
 	Version     string // build version, surfaced by GET /version
 	Repo        string // GitHub owner/repo for the update check
 	MetaBase    string // metadata provider base URL (Open Library); overridable for tests
+	WatchDir    string // watched folder auto-imported into the library
 }
 
 // Server holds dependencies for the HTTP handlers.
@@ -42,6 +45,7 @@ type Server struct {
 	version     string
 	repo        string
 	metaBase    string
+	watchDir    string
 	fbMu        sync.Mutex
 	fbCache     map[string][]byte // id -> FB2-converted EPUB
 	upMu        sync.Mutex
@@ -61,7 +65,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	s := &Server{
 		st: st, bookFile: cfg.BookFile, requireAuth: cfg.RequireAuth,
 		masterKey: cfg.MasterKey, demo: cfg.Demo, version: cfg.Version, repo: cfg.Repo,
-		metaBase: metaBase,
+		metaBase: metaBase, watchDir: cfg.WatchDir,
 	}
 	mux := http.NewServeMux()
 
@@ -79,6 +83,7 @@ func NewRouter(st *store.Store, cfg Config) http.Handler {
 	mux.HandleFunc("GET /api/v1/search", s.search)
 	mux.HandleFunc("GET /api/v1/series", s.listSeries)
 	mux.HandleFunc("POST /api/v1/books", s.createBook)
+	mux.HandleFunc("POST /api/v1/library/scan", s.scanLibrary)
 	mux.HandleFunc("GET /api/v1/books/{id}", s.getBook)
 	mux.HandleFunc("DELETE /api/v1/books/{id}", s.deleteBook)
 	mux.HandleFunc("GET /api/v1/sync", s.syncDelta)
@@ -640,7 +645,7 @@ func (s *Server) getBook(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, b)
 }
 
-// POST /api/v1/books — multipart upload of an EPUB; parses metadata + cover.
+// POST /api/v1/books — multipart upload of an EPUB/FB2; parses metadata + cover.
 func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(128 << 20); err != nil {
 		badRequest(w, err)
@@ -657,17 +662,28 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 		serverError(w, err)
 		return
 	}
-
-	// content hash → dedup: if the same file is already here, return it (no duplicate)
-	hash := fmt.Sprintf("%x", sha256.Sum256(data))
-	if existing, ok := s.st.FindBookByHash(hash); ok {
-		writeJSON(w, http.StatusOK, existing)
+	b, created, err := importBytes(s.st, hdr.Filename, data, r.Host)
+	if err != nil {
+		serverError(w, err)
 		return
 	}
+	if created {
+		writeJSON(w, http.StatusCreated, b)
+	} else {
+		writeJSON(w, http.StatusOK, b) // dedup: identical file already present
+	}
+}
 
+// importBytes ingests one book file: hash + dedup, parse metadata + cover, persist.
+// Shared by the upload endpoint and the watched-folder scanner. created=false on dedup.
+func importBytes(st *store.Store, filename string, data []byte, host string) (model.Book, bool, error) {
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	if existing, ok := st.FindBookByHash(hash); ok {
+		return existing, false, nil
+	}
 	meta, _ := epub.Parse(data) // best-effort (EPUB)
 	format := model.FormatEPUB
-	if fb2.IsFB2(data) { // FB2: parse its own metadata
+	if fb2.IsFB2(data) {
 		format = model.FormatFB2
 		t, a, lang, cover := fb2.Meta(data)
 		meta.Title, meta.Authors, meta.Language, meta.Cover = t, a, lang, cover
@@ -675,13 +691,12 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	id := fmt.Sprintf("bk-%d", time.Now().UnixNano())
 	title := meta.Title
 	if title == "" {
-		title = strings.TrimSuffix(strings.TrimSuffix(hdr.Filename, ".epub"), ".fb2")
+		title = strings.TrimSuffix(strings.TrimSuffix(filename, ".epub"), ".fb2")
 	}
 	authors := meta.Authors
 	if authors == nil {
 		authors = []string{}
 	}
-
 	now := time.Now().UTC().Format(time.RFC3339)
 	b := model.Book{
 		ID: id, Title: title, Authors: authors, Format: format,
@@ -694,21 +709,57 @@ func (s *Server) createBook(w http.ResponseWriter, r *http.Request) {
 	if meta.Description != "" {
 		b.Description = &meta.Description
 	}
-	if err := s.st.SaveBookFile(id, data); err != nil {
-		serverError(w, err)
-		return
+	if err := st.SaveBookFile(id, data); err != nil {
+		return model.Book{}, false, err
 	}
 	if len(meta.Cover) > 0 {
-		if err := s.st.SaveBookCover(id, meta.Cover); err == nil {
-			url := fmt.Sprintf("http://%s/api/v1/books/%s/cover", r.Host, id)
-			b.CoverURL = &url
+		if err := st.SaveBookCover(id, meta.Cover); err == nil && host != "" {
+			u := fmt.Sprintf("http://%s/api/v1/books/%s/cover", host, id)
+			b.CoverURL = &u
 		}
 	}
-	if err := s.st.SaveBook(b); err != nil {
-		serverError(w, err)
-		return
+	if err := st.SaveBook(b); err != nil {
+		return model.Book{}, false, err
 	}
-	writeJSON(w, http.StatusCreated, b)
+	return b, true, nil
+}
+
+// ScanWatchDir imports new .epub/.fb2 files from dir, moving processed files to .imported.
+func ScanWatchDir(st *store.Store, dir string) int {
+	if dir == "" {
+		return 0
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	imported := 0
+	doneDir := filepath.Join(dir, ".imported")
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		ext := strings.ToLower(filepath.Ext(e.Name()))
+		if ext != ".epub" && ext != ".fb2" {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if _, created, err := importBytes(st, e.Name(), data, ""); err == nil && created {
+			imported++
+		}
+		_ = os.MkdirAll(doneDir, 0o755)
+		_ = os.Rename(p, filepath.Join(doneDir, e.Name())) // don't re-scan
+	}
+	return imported
+}
+
+// POST /api/v1/library/scan — import any new files in the watched folder now.
+func (s *Server) scanLibrary(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"imported": ScanWatchDir(s.st, s.watchDir)})
 }
 
 func (s *Server) getBookFile(w http.ResponseWriter, r *http.Request) {
