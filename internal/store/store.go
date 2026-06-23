@@ -47,6 +47,7 @@ func Open(dbPath, filesDir string) (*Store, error) {
 	if err := s.seedIfEmpty(); err != nil {
 		return nil, err
 	}
+	s.migrateEmbeddedProgress()
 	return s, nil
 }
 
@@ -97,6 +98,7 @@ func (s *Store) migrate() error {
 		CREATE TABLE IF NOT EXISTS settings  (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS users      (id TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, created TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS preferences (user_id TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(user_id, key));
+		CREATE TABLE IF NOT EXISTS progress (user_id TEXT NOT NULL, book_id TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(user_id, book_id));
 		CREATE TABLE IF NOT EXISTS smart_shelves (id TEXT PRIMARY KEY, data TEXT NOT NULL);
 		CREATE TABLE IF NOT EXISTS tombstones (book_id TEXT PRIMARY KEY, deleted_at TEXT NOT NULL);
 		CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(book_id UNINDEXED, title, authors, description, tags, tokenize='unicode61 remove_diacritics 2');
@@ -392,10 +394,15 @@ type BookQuery struct {
 	Size      int    `json:"-"`
 }
 
-func (s *Store) ListBooks(q BookQuery) (model.Page[model.Book], error) {
+func (s *Store) ListBooks(userID string, q BookQuery) (model.Page[model.Book], error) {
 	books, err := s.allBooks()
 	if err != nil {
 		return model.Page[model.Book]{}, err
+	}
+	// overlay the requesting user's reading progress (per-user state)
+	prog := s.userProgressMap(userID)
+	for i := range books {
+		books[i].ReadProgress = prog[books[i].ID]
 	}
 	if q.Search != "" {
 		needle := strings.ToLower(q.Search)
@@ -571,41 +578,94 @@ func (s *Store) SyncDelta(since string) (changed []model.Book, removed []string,
 }
 
 // PutProgression updates a book's reading position; auto-marks completed near the end.
-func (s *Store) PutProgression(id string, p model.ReadProgress) (model.Book, bool, error) {
-	b, ok, err := s.GetBook(id)
-	if err != nil || !ok {
-		return model.Book{}, ok, err
+// ---------- per-user reading progress (each family member has their own place) ----------
+
+// GetProgression returns a user's reading progress for a book (nil if none).
+func (s *Store) GetProgression(userID, bookID string) *model.ReadProgress {
+	var raw string
+	if s.db.QueryRow(`SELECT data FROM progress WHERE user_id=? AND book_id=?`, userID, bookID).Scan(&raw) != nil {
+		return nil
+	}
+	var rp model.ReadProgress
+	if json.Unmarshal([]byte(raw), &rp) != nil {
+		return nil
+	}
+	return &rp
+}
+
+func (s *Store) saveProgress(userID, bookID string, rp model.ReadProgress) error {
+	raw, _ := json.Marshal(rp)
+	_, err := s.db.Exec(`INSERT INTO progress(user_id,book_id,data) VALUES(?,?,?)
+		ON CONFLICT(user_id,book_id) DO UPDATE SET data=excluded.data`, userID, bookID, string(raw))
+	return err
+}
+
+// userProgressMap is every book's progress for one user (for the ListBooks overlay).
+func (s *Store) userProgressMap(userID string) map[string]*model.ReadProgress {
+	out := map[string]*model.ReadProgress{}
+	rows, err := s.db.Query(`SELECT book_id, data FROM progress WHERE user_id = ?`, userID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var bid, raw string
+		if rows.Scan(&bid, &raw) == nil {
+			var rp model.ReadProgress
+			if json.Unmarshal([]byte(raw), &rp) == nil {
+				out[bid] = &rp
+			}
+		}
+	}
+	return out
+}
+
+// migrateEmbeddedProgress moves any progress embedded in book JSON to the owner's
+// per-user rows, once (so existing/seed reading state isn't lost).
+func (s *Store) migrateEmbeddedProgress() {
+	if _, done, _ := s.GetSetting("progress_migrated"); done {
+		return
+	}
+	books, _ := s.allBooks()
+	for _, b := range books {
+		if b.ReadProgress != nil {
+			_ = s.saveProgress(OwnerID, b.ID, *b.ReadProgress)
+		}
+	}
+	_ = s.SetSetting("progress_migrated", "true")
+}
+
+func (s *Store) PutProgression(userID, id string, p model.ReadProgress) (*model.ReadProgress, bool, error) {
+	if _, ok, err := s.GetBook(id); err != nil || !ok {
+		return nil, ok, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	p.LastReadAt = &now
 	if p.DeviceName == nil {
-		dn := "Web PWA"
+		dn := "client"
 		p.DeviceName = &dn
 	}
 	if p.TotalProgression >= 0.995 {
 		p.Completed = true
 	}
-	b.ReadProgress = &p
-	return b, true, s.SaveBook(b)
+	return &p, true, s.saveProgress(userID, id, p)
 }
 
-func (s *Store) SetCompleted(id string, completed bool) (model.Book, bool, error) {
-	b, ok, err := s.GetBook(id)
-	if err != nil || !ok {
-		return model.Book{}, ok, err
+func (s *Store) SetCompleted(userID, id string, completed bool) (*model.ReadProgress, bool, error) {
+	if _, ok, err := s.GetBook(id); err != nil || !ok {
+		return nil, ok, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	rp := model.ReadProgress{LastReadAt: &now, DeviceName: strptr("Web PWA")}
-	if b.ReadProgress != nil {
-		rp = *b.ReadProgress
+	rp := model.ReadProgress{LastReadAt: &now, DeviceName: strptr("client")}
+	if cur := s.GetProgression(userID, id); cur != nil {
+		rp = *cur
 		rp.LastReadAt = &now
 	}
 	rp.Completed = completed
 	if completed {
 		rp.Progression, rp.TotalProgression = 1, 1
 	}
-	b.ReadProgress = &rp
-	return b, true, s.SaveBook(b)
+	return &rp, true, s.saveProgress(userID, id, rp)
 }
 
 // ---------- shelves ----------
@@ -711,7 +771,7 @@ func (s *Store) DeleteSmartShelf(id string) error {
 }
 
 // SmartShelfBooks evaluates a smart shelf's rules (with request paging) into a page of books.
-func (s *Store) SmartShelfBooks(id string, page, size int) (model.Page[model.Book], bool, error) {
+func (s *Store) SmartShelfBooks(userID, id string, page, size int) (model.Page[model.Book], bool, error) {
 	var raw string
 	err := s.db.QueryRow(`SELECT data FROM smart_shelves WHERE id = ?`, id).Scan(&raw)
 	if err == sql.ErrNoRows {
@@ -726,7 +786,7 @@ func (s *Store) SmartShelfBooks(id string, page, size int) (model.Page[model.Boo
 	}
 	q := sh.Rules
 	q.Page, q.Size = page, size
-	res, err := s.ListBooks(q)
+	res, err := s.ListBooks(userID, q)
 	return res, true, err
 }
 

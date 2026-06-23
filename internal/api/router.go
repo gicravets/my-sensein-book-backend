@@ -244,7 +244,7 @@ func (s *Server) deleteSmartShelf(w http.ResponseWriter, r *http.Request) {
 func (s *Server) smartShelfBooks(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
-	res, ok, err := s.st.SmartShelfBooks(r.PathValue("id"), page, size)
+	res, ok, err := s.st.SmartShelfBooks(s.currentUser(r), r.PathValue("id"), page, size)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -516,7 +516,7 @@ func (s *Server) listBooks(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	page, _ := strconv.Atoi(q.Get("page"))
 	size, _ := strconv.Atoi(q.Get("size"))
-	res, err := s.st.ListBooks(store.BookQuery{
+	res, err := s.st.ListBooks(s.currentUser(r), store.BookQuery{
 		Search: q.Get("search"), Shelf: q.Get("shelf"), Tag: q.Get("tag"),
 		Author: q.Get("author"), Series: q.Get("series"),
 		Language: q.Get("language"), Publisher: q.Get("publisher"), Format: q.Get("format"),
@@ -539,6 +539,7 @@ func (s *Server) getBook(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
+	b.ReadProgress = s.st.GetProgression(s.currentUser(r), b.ID) // per-user overlay
 	writeJSON(w, http.StatusOK, b)
 }
 
@@ -741,16 +742,15 @@ func (s *Server) removeBookFromShelf(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getProgression(w http.ResponseWriter, r *http.Request) {
-	b, ok, err := s.st.GetBook(r.PathValue("id"))
-	if err != nil {
+	id := r.PathValue("id")
+	if _, ok, err := s.st.GetBook(id); err != nil {
 		serverError(w, err)
 		return
-	}
-	if !ok {
+	} else if !ok {
 		notFound(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, b.ReadProgress)
+	writeJSON(w, http.StatusOK, s.st.GetProgression(s.currentUser(r), id))
 }
 
 func (s *Server) putProgression(w http.ResponseWriter, r *http.Request) {
@@ -759,7 +759,7 @@ func (s *Server) putProgression(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	b, ok, err := s.st.PutProgression(r.PathValue("id"), p)
+	rp, ok, err := s.st.PutProgression(s.currentUser(r), r.PathValue("id"), p)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -768,7 +768,7 @@ func (s *Server) putProgression(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, b.ReadProgress)
+	writeJSON(w, http.StatusOK, rp)
 }
 
 func (s *Server) patchReadProgress(w http.ResponseWriter, r *http.Request) {
@@ -779,7 +779,7 @@ func (s *Server) patchReadProgress(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, err)
 		return
 	}
-	b, ok, err := s.st.SetCompleted(r.PathValue("id"), body.Completed)
+	rp, ok, err := s.st.SetCompleted(s.currentUser(r), r.PathValue("id"), body.Completed)
 	if err != nil {
 		serverError(w, err)
 		return
@@ -788,7 +788,7 @@ func (s *Server) patchReadProgress(w http.ResponseWriter, r *http.Request) {
 		notFound(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, b.ReadProgress)
+	writeJSON(w, http.StatusOK, rp)
 }
 
 func (s *Server) patchRating(w http.ResponseWriter, r *http.Request) {

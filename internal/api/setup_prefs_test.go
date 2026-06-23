@@ -99,6 +99,64 @@ func TestUsersAndPerUserPrefs(t *testing.T) {
 	}
 }
 
+func TestPerUserProgress(t *testing.T) {
+	h := newTestServer(t, Config{})
+
+	// two fresh users (not the owner, who has migrated seed progress), each with a device
+	mkUser := func(name string) (userID, key string) {
+		var u struct {
+			ID string `json:"id"`
+		}
+		json.Unmarshal(do(t, h, "POST", "/api/v1/users", map[string]any{"name": name}).Body.Bytes(), &u)
+		var d struct {
+			Key string `json:"key"`
+		}
+		json.Unmarshal(do(t, h, "POST", "/api/v1/auth/device", map[string]any{"name": name + "-dev", "userId": u.ID}).Body.Bytes(), &d)
+		return u.ID, d.Key
+	}
+	_, ka := mkUser("Папа")
+	_, kb := mkUser("Аня")
+
+	var page struct {
+		Content []struct {
+			ID string `json:"id"`
+		} `json:"content"`
+	}
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/books", ka, nil).Body.Bytes(), &page)
+	if len(page.Content) == 0 {
+		t.Fatal("no seed books")
+	}
+	bid := page.Content[0].ID
+
+	// user A records a reading position
+	doKey(t, h, "PUT", "/api/v1/books/"+bid+"/progression", ka, map[string]any{"totalProgression": 0.5})
+
+	// A sees their progress; B does not (isolation)
+	var pa, pb map[string]any
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/books/"+bid+"/progression", ka, nil).Body.Bytes(), &pa)
+	if pa["totalProgression"] != 0.5 {
+		t.Errorf("A progression = %v want 0.5", pa["totalProgression"])
+	}
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/books/"+bid+"/progression", kb, nil).Body.Bytes(), &pb)
+	if pb["totalProgression"] == 0.5 {
+		t.Errorf("B leaked A's progress")
+	}
+
+	// list overlay is per-user too
+	var la struct {
+		Content []struct {
+			ID           string          `json:"id"`
+			ReadProgress map[string]any  `json:"readProgress"`
+		} `json:"content"`
+	}
+	json.Unmarshal(doKey(t, h, "GET", "/api/v1/books", ka, nil).Body.Bytes(), &la)
+	for _, bk := range la.Content {
+		if bk.ID == bid && (bk.ReadProgress == nil || bk.ReadProgress["totalProgression"] != 0.5) {
+			t.Errorf("A list overlay missing progress for %s: %v", bid, bk.ReadProgress)
+		}
+	}
+}
+
 func TestPreferencesSync(t *testing.T) {
 	h := newTestServer(t, Config{Version: "v1.0.0"})
 

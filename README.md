@@ -55,8 +55,8 @@ POST  /api/v1/auth/pair?userId=   (pair a device to a specific user; device key 
 GET   /api/v1/shelves
 GET   /api/v1/smart-shelves     POST /api/v1/smart-shelves   DELETE /api/v1/smart-shelves/{id}   GET /api/v1/smart-shelves/{id}/books   (dynamic rule-based shelves)
 GET   /api/v1/preferences       PUT  /api/v1/preferences     (per-user reader settings sync)
-GET   /api/v1/books/{id}/progression     PUT /api/v1/books/{id}/progression
-PATCH /api/v1/books/{id}/read-progress
+GET   /api/v1/books/{id}/progression     PUT /api/v1/books/{id}/progression   (per-user)
+PATCH /api/v1/books/{id}/read-progress                                       (per-user)
 GET   /api/v1/highlights       POST /api/v1/highlights
 GET   /api/v1/bookmarks        POST /api/v1/bookmarks
 ```
